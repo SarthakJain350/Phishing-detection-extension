@@ -1,0 +1,625 @@
+/* ============================================================
+   Quiet Security Design Tokens — Light Mode (Source of Truth)
+   Phishing_Detection_UI_UX_Design_Brief.md §4
+   ============================================================ */
+:root {
+  /* Core palette */
+  --color-canvas:      #f7f5f0;
+  --color-surface:     #ffffff;
+  --color-ink:         #17212b;
+  --color-muted:       #5f6b75;
+  --color-border:      #d8dee3;
+  --color-teal:        #0f766e;
+  --color-teal-soft:   #e5f3f0;
+  --color-amber:       #9a5b00;
+  --color-amber-soft:  #fff1d6;
+  --color-red:         #b42318;
+  --color-red-soft:    #fdecea;
+  --color-slate-soft:  #edf1f4;
+  --color-focus:       #2563eb;
+
+  /* Semantic surface aliases */
+  --bg-main:           var(--color-canvas);
+  --bg-panel:          var(--color-surface);
+  --text-primary:      var(--color-ink);
+  --text-secondary:    var(--color-muted);
+  --border-color:      var(--color-border);
+  --btn-primary-bg:    var(--color-teal);
+  --btn-primary-text:  #ffffff;
+  --btn-secondary-bg:  var(--color-surface);
+  --btn-secondary-text: var(--color-ink);
+
+  /* Spacing rhythm (8px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* Shape & Borders */
+  --radius:    8px;
+  --radius-sm: 4px;
+}
+
+/* Note: Dark mode is intentionally disabled to keep the agreed Editorial Quiet Security
+   light palette active by default across all OS/browser color schemes without toggles. */
+
+/* ============================================================
+   Reset & Editorial Typography Baseline
+   ============================================================ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 360px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 360px;
+}
+
+/* Numeric tabular figures for scores, dates, statistics */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Keyboard Focus Indicators
+   ============================================================ */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   Layout Container
+   ============================================================ */
+.popup-layout {
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  min-height: 240px;
+  background-color: var(--bg-main);
+}
+
+/* ============================================================
+   Header (Quiet Editorial Masthead)
+   ============================================================ */
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px var(--space-4);
+  background-color: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.header__icon {
+  flex-shrink: 0;
+  color: var(--color-teal);
+}
+
+.header__title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   Current Site Row (Clean LTR Truncation)
+   ============================================================ */
+.site-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px var(--space-4);
+  background-color: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.site-row__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.site-row__domain-container {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.site-row__domain {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* ============================================================
+   Main Content Area
+   ============================================================ */
+.content {
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  flex: 1;
+}
+
+/* ============================================================
+   Empty / Idle State
+   ============================================================ */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.empty-state__heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.empty-state__body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ============================================================
+   Loading / Scanning State (Restrained & Minimal)
+   ============================================================ */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-3);
+  text-align: center;
+}
+
+.loading-indicator {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--color-teal);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-indicator {
+    animation: none;
+    border-top-color: var(--color-teal);
+    opacity: 0.7;
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-state__heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.loading-state__body {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   Result Card (Predominantly White Surface with Semantic Status Bar)
+   ============================================================ */
+.result-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* Semantic top indicator bar (3px line) */
+.result-card__status-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background-color: var(--border-color);
+}
+
+.result-card--phishing .result-card__status-bar {
+  background-color: var(--color-red);
+}
+
+.result-card--suspicious .result-card__status-bar {
+  background-color: var(--color-amber);
+}
+
+.result-card--likely_legitimate .result-card__status-bar {
+  background-color: var(--color-teal);
+}
+
+.result-card--unavailable .result-card__status-bar,
+.result-card--partial .result-card__status-bar {
+  background-color: var(--color-muted);
+}
+
+/* Card Header: Classification & Score */
+.result-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding-top: var(--space-1);
+}
+
+.classification-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.classification-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.classification-badge--phishing       { color: var(--color-red); }
+.classification-badge--suspicious     { color: var(--color-amber); }
+.classification-badge--likely_legitimate { color: var(--color-ink); }
+.classification-badge--unavailable,
+.classification-badge--partial        { color: var(--text-secondary); }
+
+/* Restrained Risk Score Block */
+.score-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.score-badge__row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.score-badge__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.score-badge__value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.score-badge__denominator {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Score Disclaimer */
+.score-disclaimer {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* Incomplete status chip */
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-slate-soft);
+  color: var(--text-secondary);
+  width: fit-content;
+}
+
+.status-chip--partial {
+  background-color: var(--color-amber-soft);
+  color: var(--color-amber);
+}
+
+.status-chip--unavailable {
+  background-color: var(--color-red-soft);
+  color: var(--color-red);
+}
+
+/* Summary paragraph */
+.result-summary {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.45;
+}
+
+/* ============================================================
+   Expandable Evidence Section ("Why this result?")
+   ============================================================ */
+.why-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-teal);
+  width: fit-content;
+}
+
+.why-toggle-btn:hover {
+  text-decoration: underline;
+}
+
+.evidence-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-color);
+}
+
+.evidence-pane__heading {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+}
+
+.evidence-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.evidence-item {
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding-bottom: 4px;
+}
+
+.evidence-item__indicator {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-top: 6px;
+}
+
+.evidence-item__indicator--high   { background-color: var(--color-red); }
+.evidence-item__indicator--medium { background-color: var(--color-amber); }
+.evidence-item__indicator--low    { background-color: var(--color-muted); }
+
+.evidence-item__content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evidence-item__text {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.evidence-item__meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Check Status key-value table */
+.status-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-color);
+}
+
+.status-table__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.status-table__name {
+  color: var(--text-secondary);
+}
+
+.status-table__value {
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-table__value--complete {
+  color: var(--color-teal);
+}
+
+.status-table__value--partial {
+  color: var(--color-amber);
+}
+
+.status-table__value--unavailable,
+.status-table__value--timeout,
+.status-table__value--error {
+  color: var(--color-red);
+}
+
+.score-explanation-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding-top: 2px;
+}
+
+/* ============================================================
+   Error / Connection Failure Panel (Fail-safe)
+   ============================================================ */
+.error-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.error-card__status-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background-color: var(--color-red);
+}
+
+.error-card__heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: var(--space-1);
+}
+
+.error-card__body {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* ============================================================
+   Buttons (Editorial Restrained Hierarchy)
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+  width: 100%;
+  line-height: 1.2;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-text);
+  border-color: var(--btn-primary-bg);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background-color: #0b5c56;
+  border-color: #0b5c56;
+}
+
+.btn--secondary {
+  background-color: var(--btn-secondary-bg);
+  color: var(--btn-secondary-text);
+  border-color: var(--border-color);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background-color: var(--color-canvas);
+}
+
+/* ============================================================
+   Footer (Quiet Secondary Actions — Not Fake Navigation)
+   ============================================================ */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px var(--space-4);
+  background-color: var(--bg-panel);
+  border-top: 1px solid var(--border-color);
+}
+
+.footer__links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.footer__action--disabled {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.6;
+  cursor: default;
+  user-select: none;
+}
+
+.footer__version {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}

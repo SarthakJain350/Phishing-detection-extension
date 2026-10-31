@@ -1,0 +1,11 @@
+{
+  "project_name": "phishing-attack-detector",
+  "version": "1.0.0",
+  "workflow": "gsd",
+  "model_profile": "quality",
+  "team": {
+    "person1": "Sarthak",
+    "person2": "Rohan"
+  },
+  "created_at": "2026-10-31T23:55:00Z"
+}
