@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<!--
+  SPIKE: Chrome MV3 Navigation Warning Interstitial
+  ====================================================
+  Status:    PROTOTYPE — not connected to production extension build.
+  Scope:     Feasibility spike only (extension/spikes/).
+             Does NOT affect extension/dist/ or the production manifest.
+  Author:    Rohan (Phase 2, Task 2.3.1)
+  Purpose:   Standalone HTML prototype of the high-risk warning interstitial
+             described in the UI/UX Design Brief §9 (Surface C).
+
+  ARCHITECTURE NOTES (MV3):
+  - This file would be navigated to by a service worker redirect when a
+    high-risk URL is detected. The destination URL and detection metadata are
+    passed as URL query parameters (see warning.js for parsing).
+  - Query parameters accepted:
+      ?domain=   Destination hostname (URL-encoded)
+      ?score=    Risk score integer 0–100
+      ?reason1=  First reason string (URL-encoded, optional)
+      ?reason2=  Second reason string (URL-encoded, optional)
+      ?reason3=  Third reason string (URL-encoded, optional)
+      ?partial=  "1" if analysis was partial/incomplete
+  - "Go back to safety" calls history.back() or navigates to a safe fallback.
+  - "Continue anyway" sets a session-scoped allowlist entry in
+    chrome.storage.session (not implemented here — see warning.js notes)
+    then redirects to the original destination.
+
+  PRIVACY:
+  - No page content, email bodies, or credentials are passed as parameters.
+  - Only the domain name and score are communicated via URL parameters.
+  - This page does NOT send data to any backend or external service.
+
+  MANUAL TESTING:
+  See extension/spikes/SPIKE_REPORT.md for step-by-step instructions.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warning — Phishing Attack Detector</title>
+  <style>
+    /* -----------------------------------------------------------------------
+       Design Tokens — Quiet Security palette (matches production extension)
+       See Phishing_Detection_UI_UX_Design_Brief.md §4
+    ----------------------------------------------------------------------- */
+    :root {
+      --canvas:     #F7F5F0;
+      --surface:    #FFFFFF;
+      --ink:        #17212B;
+      --muted:      #5F6B75;
+      --border:     #D8DEE3;
+      --teal:       #0F766E;
+      --teal-soft:  #E5F3F0;
+      --amber:      #9A5B00;
+      --amber-soft: #FFF1D6;
+      --red:        #B42318;
+      --red-soft:   #FDECEA;
+      --slate-soft: #EDF1F4;
+      --focus:      #2563EB;
+      --radius-sm:  6px;
+      --radius-md:  8px;
+      --radius-lg:  12px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas:     #111820;
+        --surface:    #19232D;
+        --ink:        #F3F5F7;
+        --muted:      #AAB5BF;
+        --border:     #35424E;
+        --teal:       #5CC8B8;
+        --teal-soft:  #1A2E2B;
+        --red:        #FF8178;
+        --red-soft:   #2D1210;
+        --slate-soft: #1E2A35;
+      }
+    }
+
+    /* -----------------------------------------------------------------------
+       Base reset + body
+    ----------------------------------------------------------------------- */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      min-height: 100%;
+      background-color: var(--canvas);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* -----------------------------------------------------------------------
+       Layout
+    ----------------------------------------------------------------------- */
+    .page {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 480px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+
+    /* -----------------------------------------------------------------------
+       Status bar — red strip at top of card
+    ----------------------------------------------------------------------- */
+    .status-bar {
+      height: 4px;
+      background-color: var(--red);
+    }
+
+    /* -----------------------------------------------------------------------
+       Card body
+    ----------------------------------------------------------------------- */
+    .card-body {
+      padding: 24px 24px 20px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Header: icon + product name
+    ----------------------------------------------------------------------- */
+    .product-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .product-header svg {
+      flex-shrink: 0;
+      color: var(--muted);
+    }
+
+    .product-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.01em;
+    }
+
+    /* -----------------------------------------------------------------------
+       Warning badge area
+    ----------------------------------------------------------------------- */
+    .warning-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background-color: var(--red-soft);
+      color: var(--red);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    .warning-badge svg {
+      flex-shrink: 0;
+    }
+
+    /* -----------------------------------------------------------------------
+       Main heading
+    ----------------------------------------------------------------------- */
+    .warning-heading {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1.3;
+      margin-bottom: 16px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Destination domain display
+    ----------------------------------------------------------------------- */
+    .destination-section {
+      background-color: var(--red-soft);
+      border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      margin-bottom: 16px;
+    }
+
+    .destination-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .destination-domain {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--ink);
+      word-break: break-all;
+      /* LTR override: domain must read left-to-right regardless of system locale */
+      direction: ltr;
+      unicode-bidi: bidi-override;
+    }
+
+    /* -----------------------------------------------------------------------
+       Risk score
+    ----------------------------------------------------------------------- */
+    .risk-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .risk-score {
+      font-size: 32px;
+      font-weight: 700;
+      color: var(--red);
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+    }
+
+    .risk-score-denom {
+      font-size: 16px;
+      font-weight: 400;
+      color: var(--muted);
+    }
+
+    .risk-label {
+      font-size: 12px;
+      color: var(--muted);
+      align-self: flex-end;
+      margin-bottom: 2px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Reasons list
+    ----------------------------------------------------------------------- */
+    .reasons-list {
+      list-style: none;
+      margin-bottom: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .reason-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--ink);
+      line-height: 1.45;
+    }
+
+    .reason-dot {
+      flex-shrink: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--red);
+      margin-top: 6px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Partial analysis notice
+    ----------------------------------------------------------------------- */
+    .partial-notice {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      background-color: var(--slate-soft);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
+    .partial-notice svg {
+      flex-shrink: 0;
+      margin-top: 1px;
+      color: var(--muted);
+    }
+
+    /* -----------------------------------------------------------------------
+       Divider
+    ----------------------------------------------------------------------- */
+    .divider {
+      height: 1px;
+      background-color: var(--border);
+      margin: 0 -24px 20px;
+    }
+
+    /* -----------------------------------------------------------------------
+       Action buttons
+    ----------------------------------------------------------------------- */
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: var(--radius-md);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.15s ease;
+      text-decoration: none;
+      width: 100%;
+    }
+
+    .btn:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .btn:hover {
+      opacity: 0.88;
+    }
+
+    .btn:active {
+      opacity: 0.75;
+    }
+
+    /* Primary: "Go back to safety" — teal fill, visually dominant */
+    .btn-primary {
+      background-color: var(--teal);
+      color: #FFFFFF;
+    }
+
+    /* Secondary: "Continue anyway" — white surface, bordered, ink text */
+    .btn-secondary {
+      background-color: var(--surface);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      font-weight: 500;
+    }
+
+    /* -----------------------------------------------------------------------
+       Disclaimer footnote
+    ----------------------------------------------------------------------- */
+    .disclaimer {
+      margin-top: 16px;
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    /* -----------------------------------------------------------------------
+       Session allowlist confirmation (shown after "Continue anyway") — hidden
+       until JS toggles visibility.
+    ----------------------------------------------------------------------- */
+    #continue-confirm {
+      display: none;
+      background-color: var(--amber-soft);
+      border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      font-size: 13px;
+      color: var(--amber);
+      line-height: 1.45;
+    }
+
+    #continue-confirm.visible {
+      display: block;
+    }
+
+    /* -----------------------------------------------------------------------
+       Reduced-motion support
+    ----------------------------------------------------------------------- */
+    @media (prefers-reduced-motion: reduce) {
+      .btn {
+        transition: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page" role="main">
+    <article class="card" aria-labelledby="warning-heading">
+      <!-- Red status bar at top -->
+      <div class="status-bar" role="presentation" aria-hidden="true"></div>
+
+      <div class="card-body">
+
+        <!-- Product header -->
+        <header class="product-header">
+          <!-- Shield + link icon (inline SVG, no external asset dependency) -->
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"
+               aria-hidden="true" focusable="false"
+               xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 2L3 5V10C3 13.87 6.07 17.47 10 18.5C13.93 17.47 17 13.87 17 10V5L10 2Z"
+                  fill="currentColor" opacity="0.15"/>
+            <path d="M10 2L3 5V10C3 13.87 6.07 17.47 10 18.5C13.93 17.47 17 13.87 17 10V5L10 2Z"
+                  stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M7.5 10.5L9.5 12.5L12.5 8.5" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="product-name">Phishing Attack Detector</span>
+        </header>
+
+        <!-- Warning badge -->
+        <div class="warning-badge" role="status" aria-live="polite">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+               aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 1L11 10H1L6 1Z" fill="currentColor" opacity="0.2"/>
+            <path d="M6 1L11 10H1L6 1Z" stroke="currentColor" stroke-width="1.2"
+                  stroke-linejoin="round"/>
+            <path d="M6 5V7" stroke="currentColor" stroke-width="1.2"
+                  stroke-linecap="round"/>
+            <circle cx="6" cy="8.5" r="0.5" fill="currentColor"/>
+          </svg>
+          Phishing risk detected
+        </div>
+
+        <!-- Main heading -->
+        <h1 id="warning-heading" class="warning-heading">
+          This site may be a phishing attempt
+        </h1>
+
+        <!-- Destination domain -->
+        <section class="destination-section" aria-label="Destination site">
+          <div class="destination-label">Destination</div>
+          <div class="destination-domain" id="destination-domain"
+               aria-label="Destination domain">
+            <!-- Populated by warning.js -->
+            <span aria-hidden="true">—</span>
+          </div>
+        </section>
+
+        <!-- Risk score -->
+        <div class="risk-row" aria-label="Risk score">
+          <span class="risk-score" id="risk-score" aria-live="polite">—</span>
+          <span class="risk-score-denom" aria-hidden="true">/ 100</span>
+          <span class="risk-label">Risk score</span>
+        </div>
+
+        <!-- Reasons list -->
+        <ul class="reasons-list" id="reasons-list" aria-label="Reasons">
+          <!-- Populated by warning.js -->
+        </ul>
+
+        <!-- Partial analysis notice — hidden by default, shown when ?partial=1 -->
+        <div id="partial-notice" class="partial-notice" role="note" hidden>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+               aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M7 4v3.5" stroke="currentColor" stroke-width="1.2"
+                  stroke-linecap="round"/>
+            <circle cx="7" cy="9.5" r="0.5" fill="currentColor"/>
+          </svg>
+          <span>Analysis was partial or incomplete. This result is based on
+          available evidence only. Treat it with additional caution.</span>
+        </div>
+
+        <!-- Session-allowlist confirmation (shown after "Continue anyway") -->
+        <div id="continue-confirm" role="alert">
+          Proceeding to <strong id="confirm-domain"></strong>.
+          This session allowlist entry will be cleared when the extension
+          restarts. You can still use the extension popup to scan this site.
+        </div>
+
+        <div class="divider" aria-hidden="true"></div>
+
+        <!-- Action buttons -->
+        <nav class="actions" aria-label="Actions">
+          <button
+            id="btn-back"
+            class="btn btn-primary"
+            type="button"
+            autofocus
+            aria-label="Go back to safety — leave this page">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+                 aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+              <path d="M9 11L5 7L9 3" stroke="currentColor" stroke-width="1.75"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Go back to safety
+          </button>
+
+          <button
+            id="btn-continue"
+            class="btn btn-secondary"
+            type="button"
+            aria-label="Continue anyway — proceed to the flagged site at your own risk">
+            Continue anyway
+          </button>
+        </nav>
+
+        <!-- Disclaimer -->
+        <p class="disclaimer">
+          Risk scores are advisory, not a guarantee.<br>
+          This interstitial is shown only for high-risk results.
+        </p>
+
+      </div><!-- /.card-body -->
+    </article>
+  </main>
+
+  <script src="warning.js"></script>
+</body>
+</html>
