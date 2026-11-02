@@ -1,5 +1,5 @@
-import type { ScanResponse, WebsiteScanRequest } from "./types";
-import { API_BASE_URL } from "./types";
+import type { ScanListResponse, ScanResponse, WebsiteScanRequest } from "./types.ts";
+import { API_BASE_URL } from "./types.ts";
 
 export const REQUEST_TIMEOUT_MS = 5_000;
 
@@ -56,6 +56,62 @@ export async function scanWebsite(
   }
 
   return response.json() as Promise<ScanResponse>;
+}
+
+/**
+ * GET /api/v1/scans
+ * Retrieves paginated recent scan history from backend.
+ * Throws a descriptive Error on network failure, timeout (5s), or non-2xx response.
+ */
+export async function listRecentScans(
+  limit: number = 20,
+  offset: number = 0
+): Promise<ScanListResponse> {
+  let response: Response;
+  try {
+    response = await fetch(
+      `${API_BASE_URL}/api/v1/scans?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      }
+    );
+  } catch (err: unknown) {
+    if (
+      err instanceof DOMException &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new Error(
+        "The request timed out after 5 seconds. The backend may be unavailable or slow to respond."
+      );
+    }
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Could not connect to the backend. Make sure the API server is running on http://127.0.0.1:8000."
+      );
+    }
+    throw new Error(
+      "An unexpected error occurred while connecting to the backend."
+    );
+  }
+
+  if (!response.ok) {
+    let errorMessage = `Backend returned HTTP ${response.status}.`;
+    try {
+      const body = (await response.json()) as {
+        error?: { code?: string; message?: string };
+      };
+      if (body?.error?.message) {
+        errorMessage = body.error.message;
+      }
+    } catch {
+      errorMessage = `Backend error: ${response.status} ${response.statusText}`;
+    }
+    throw new Error(errorMessage);
+  }
+
+  return response.json() as Promise<ScanListResponse>;
 }
 
 /**

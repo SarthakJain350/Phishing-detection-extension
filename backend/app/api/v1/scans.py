@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import Session
 
 from backend.app.core.domain import clean_url_or_hostname, normalize_target_reference
@@ -13,7 +15,7 @@ from backend.app.db.repository import ScanRepository
 from backend.app.db.session import get_db
 from backend.app.detection.orchestrator import (
     BaseDetectionOrchestrator,
-    MockDetectionOrchestrator,
+    RealDetectionOrchestrator,
 )
 from backend.app.schemas.scan import (
     EmailScanRequest,
@@ -24,10 +26,12 @@ from backend.app.schemas.scan import (
     WebsiteScanRequest,
 )
 
+logger = logging.getLogger("phishing_detector")
+
 router = APIRouter(prefix="/scans", tags=["Scans"])
 
 # Default orchestrator instance (can be overridden in tests or future phases)
-_default_orchestrator: BaseDetectionOrchestrator = MockDetectionOrchestrator()
+_default_orchestrator: BaseDetectionOrchestrator = RealDetectionOrchestrator()
 
 
 def get_orchestrator() -> BaseDetectionOrchestrator:
@@ -62,11 +66,17 @@ def _build_scan_response(record, reasons: list[str] | None = None) -> ScanRespon
                     "No strong phishing signals detected across available checks. Advisory assessment only; safety is not guaranteed."
                 ]
 
-    tool_statuses = ToolStatuses.model_validate(record.tool_statuses or {
-        "heuristics": {"status": "complete"},
-        "reputation": {"status": "complete"},
-        "llm": {"status": "complete"},
-    })
+    tool_statuses = ToolStatuses.model_validate(
+        record.tool_statuses
+        or {
+            "heuristics": {"status": "unavailable", "reason_code": "status_missing"},
+            "reputation": {
+                "status": "unavailable",
+                "reason_code": "status_missing",
+            },
+            "llm": {"status": "unavailable", "reason_code": "status_missing"},
+        }
+    )
 
     return ScanResponse(
         scan_id=record.id,
@@ -108,17 +118,24 @@ def scan_website(
     )
 
     # Persist record (never persists raw full URL or visible text)
-    record = ScanRepository.create_scan(
-        db,
-        target_type="website",
-        target_reference=target_reference,
-        classification=result.classification,
-        risk_score=result.risk_score,
-        evidence=[e.model_dump() for e in result.evidence],
-        tool_statuses=result.tool_statuses.model_dump(),
-        analysis_status=result.analysis_status,
-        source=payload.source,
-    )
+    try:
+        record = ScanRepository.create_scan(
+            db,
+            target_type="website",
+            target_reference=target_reference,
+            classification=result.classification,
+            risk_score=result.risk_score,
+            evidence=[e.model_dump() for e in result.evidence],
+            tool_statuses=result.tool_statuses.model_dump(),
+            analysis_status=result.analysis_status,
+            source=payload.source,
+        )
+    except (OperationalError, SATimeoutError, Exception) as exc:
+        logger.error("Database write failed for website scan (target=%s): %s", target_reference, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is temporarily unavailable. The scan result could not be saved. Please try again shortly.",
+        ) from exc
 
     return _build_scan_response(record, reasons=result.reasons)
 
@@ -153,17 +170,24 @@ def scan_email(
     )
 
     # Persist record (never persists full message body or full link paths)
-    record = ScanRepository.create_scan(
-        db,
-        target_type="email",
-        target_reference=primary_domain,
-        classification=result.classification,
-        risk_score=result.risk_score,
-        evidence=[e.model_dump() for e in result.evidence],
-        tool_statuses=result.tool_statuses.model_dump(),
-        analysis_status=result.analysis_status,
-        source=payload.source,
-    )
+    try:
+        record = ScanRepository.create_scan(
+            db,
+            target_type="email",
+            target_reference=primary_domain,
+            classification=result.classification,
+            risk_score=result.risk_score,
+            evidence=[e.model_dump() for e in result.evidence],
+            tool_statuses=result.tool_statuses.model_dump(),
+            analysis_status=result.analysis_status,
+            source=payload.source,
+        )
+    except (OperationalError, SATimeoutError, Exception) as exc:
+        logger.error("Database write failed for email scan (target=%s): %s", primary_domain, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is temporarily unavailable. The scan result could not be saved. Please try again shortly.",
+        ) from exc
 
     return _build_scan_response(record, reasons=result.reasons)
 

@@ -55,6 +55,14 @@ export interface ScanResponse {
   created_at: string;
 }
 
+/** Paginated list of scans — matches ScanListResponse Pydantic schema */
+export interface ScanListResponse {
+  items: ScanResponse[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 /** Website scan request — matches WebsiteScanRequest Pydantic schema exactly */
 export interface WebsiteScanRequest {
   url: string;
@@ -66,5 +74,5 @@ export interface WebsiteScanRequest {
 export type PopupUIState =
   | { kind: "idle" }
   | { kind: "scanning" }
-  | { kind: "result"; data: ScanResponse }
+  | { kind: "result"; data: ScanResponse; scannedUrl?: string }
   | { kind: "connection_error"; message: string };

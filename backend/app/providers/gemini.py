@@ -56,11 +56,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-_MODEL_ID = "gemini-1.5-flash-latest"
+_MODEL_ID = "gemini-3.5-flash-lite"
 _GENERATE_ENDPOINT = f"{_GEMINI_API_BASE}/models/{_MODEL_ID}:generateContent"
 
 # Total budget for one analyze_target call (including any single retry)
-_TOTAL_TIMEOUT_SECONDS = 5.0
+_TOTAL_TIMEOUT_SECONDS = 20.0
 
 # Minimum time remaining (seconds) required before attempting a retry
 _MIN_TIME_FOR_RETRY = 1.0
@@ -408,6 +408,7 @@ class GeminiAdapter:
             "x-goog-api-key": self._api_key,
         }
 
+        request_started = time.monotonic()
         try:
             with httpx.Client(timeout=timeout) as client:
                 response = client.post(
@@ -415,14 +416,37 @@ class GeminiAdapter:
                     json=payload,
                     headers=headers,
                 )
-        except httpx.TimeoutException:
-            logger.debug("Gemini API call timed out after %.1fs.", _TOTAL_TIMEOUT_SECONDS)
-            return None, ToolStatusDetail(status="timeout", reason_code="request_timeout"), False
-        except httpx.HTTPError as exc:
-            logger.debug("Gemini API HTTP transport error: %s", type(exc).__name__)
+            logger.debug(
+                "Gemini HTTP request completed in %.2fs with status %d",
+                time.monotonic() - request_started,
+                response.status_code,
+            )
+        except httpx.TimeoutException as exc:
+            logger.warning(
+                "Gemini API timed out after %.2fs: %s",
+                time.monotonic() - request_started,
+                type(exc).__name__,
+            )
             return (
                 None,
-                ToolStatusDetail(status="unavailable", reason_code="http_transport_error"),
+                ToolStatusDetail(
+                    status="timeout",
+                    reason_code="request_timeout",
+                ),
+                False,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "Gemini HTTP transport error after %.2fs: %s",
+                time.monotonic() - request_started,
+                type(exc).__name__,
+            )
+            return (
+                None,
+                ToolStatusDetail(
+                    status="unavailable",
+                    reason_code="http_transport_error",
+                ),
                 False,
             )
 
@@ -438,9 +462,10 @@ class GeminiAdapter:
 
         # Other non-2xx errors
         if not response.is_success:
-            logger.debug(
-                "Gemini API returned HTTP %d; treating as provider error.",
+            logger.warning(
+                "Gemini API returned HTTP %d; response body: %s",
                 response.status_code,
+                response.text[:1000],
             )
             return (
                 None,

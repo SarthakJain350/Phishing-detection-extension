@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Warning: Phishing Risk Detected — Phishing Attack Detector</title>
+  <link rel="stylesheet" href="./src/warning/warning.css">
+</head>
+<body>
+  <main class="page" role="main">
+    <article class="card" aria-labelledby="warning-heading">
+      <!-- Status bar at top -->
+      <div class="status-bar" role="presentation" aria-hidden="true"></div>
+
+      <div class="card-body">
+
+        <!-- Product header -->
+        <header class="product-header">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"
+               aria-hidden="true" focusable="false"
+               xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 2L3 5V10C3 13.87 6.07 17.47 10 18.5C13.93 17.47 17 13.87 17 10V5L10 2Z"
+                  fill="currentColor" opacity="0.15"/>
+            <path d="M10 2L3 5V10C3 13.87 6.07 17.47 10 18.5C13.93 17.47 17 13.87 17 10V5L10 2Z"
+                  stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+            <path d="M7.5 10.5L9.5 12.5L12.5 8.5" stroke="currentColor"
+                  stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="product-name">Phishing Attack Detector</span>
+        </header>
+
+        <!-- Warning badge -->
+        <div class="warning-badge" role="status" aria-live="polite">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+               aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 1L11 10H1L6 1Z" fill="currentColor" opacity="0.2"/>
+            <path d="M6 1L11 10H1L6 1Z" stroke="currentColor" stroke-width="1.2"
+                  stroke-linejoin="round"/>
+            <path d="M6 5V7" stroke="currentColor" stroke-width="1.2"
+                  stroke-linecap="round"/>
+            <circle cx="6" cy="8.5" r="0.5" fill="currentColor"/>
+          </svg>
+          Phishing risk detected
+        </div>
+
+        <!-- Warning heading -->
+        <h1 class="warning-heading" id="warning-heading">
+          This site may be a phishing attempt
+        </h1>
+
+        <!-- Destination domain container -->
+        <div class="destination-section">
+          <div class="destination-label" aria-hidden="true">Destination</div>
+          <div class="destination-domain" id="destination-domain"
+               aria-label="Flagged destination domain">
+            <!-- Populated by warning.ts -->
+          </div>
+        </div>
+
+        <!-- Risk score indicator -->
+        <div class="risk-row" aria-label="Risk score">
+          <span class="risk-score" id="risk-score" aria-label="Risk score: — out of 100">—</span>
+          <span class="risk-score-denom" aria-hidden="true">/ 100</span>
+          <span class="risk-label">Risk score</span>
+        </div>
+
+        <!-- Reasons list -->
+        <ul class="reasons-list" id="reasons-list" aria-label="Reasons">
+          <!-- Populated by warning.ts -->
+        </ul>
+
+        <!-- Partial analysis notice — hidden by default, shown when ?partial=1 -->
+        <div id="partial-notice" class="partial-notice" role="note" hidden>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+               aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M7 4v3.5" stroke="currentColor" stroke-width="1.2"
+                  stroke-linecap="round"/>
+            <circle cx="7" cy="9.5" r="0.5" fill="currentColor"/>
+          </svg>
+          <span>Analysis was partial or incomplete. This result is based on
+          available evidence only. Treat it with additional caution.</span>
+        </div>
+
+        <!-- Session-allowlist confirmation (shown after "Continue anyway") -->
+        <div id="continue-confirm" role="alert">
+          Proceeding to <strong id="confirm-domain"></strong>.
+          This session allowlist entry will be cleared when the extension
+          restarts. You can still use the extension popup to scan this site.
+        </div>
+
+        <div class="divider" aria-hidden="true"></div>
+
+        <!-- Action buttons -->
+        <nav class="actions" aria-label="Actions">
+          <button
+            id="btn-back"
+            class="btn btn-primary"
+            type="button"
+            autofocus
+            aria-label="Go back to safety — leave this page">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"
+                 aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+              <path d="M9 11L5 7L9 3" stroke="currentColor" stroke-width="1.75"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Go back to safety
+          </button>
+
+          <button
+            id="btn-continue"
+            class="btn btn-secondary"
+            type="button"
+            aria-label="Continue anyway — proceed to the flagged site at your own risk">
+            Continue anyway
+          </button>
+        </nav>
+
+        <!-- Disclaimer -->
+        <p class="disclaimer">
+          Risk scores are advisory, not a guarantee.<br>
+          This interstitial is shown only for high-risk results.
+        </p>
+
+      </div><!-- /.card-body -->
+    </article>
+  </main>
+
+  <script type="module" src="./src/warning/warning.ts"></script>
+</body>
+</html>

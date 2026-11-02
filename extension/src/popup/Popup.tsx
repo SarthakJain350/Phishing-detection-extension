@@ -5,9 +5,24 @@ import type {
   WebsiteScanRequest,
   Classification,
   AnalysisStatus,
-  ToolStatusValue,
+  ToolStatusDetail,
+  ToolStatuses,
 } from "./types";
-import { scanWebsite } from "./api";
+import { scanWebsite, listRecentScans, checkBackendHealth } from "./api";
+import {
+  isHighRiskScan,
+  createWarningPageUrl,
+  openShieldInterstitial,
+} from "./warningIntegration";
+import {
+  getToolStatusLabel,
+  getPartialAnalysisSummary,
+} from "./statusFormatting";
+import {
+  formatScanTime,
+  formatClassificationLabel,
+  formatTargetDomain,
+} from "./historyFormatting";
 import {
   ShieldLinkIcon,
   DangerIcon,
@@ -42,17 +57,6 @@ function hostnameFromUrl(url: string): string {
   } catch {
     return url;
   }
-}
-
-function toolStatusLabel(status: ToolStatusValue): string {
-  const map: Record<ToolStatusValue, string> = {
-    complete: "Complete",
-    partial: "Partial",
-    unavailable: "Unavailable",
-    timeout: "Timed out",
-    error: "Error",
-  };
-  return map[status] ?? status;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,10 +182,12 @@ function ResultSummary({
   classification,
   analysisStatus,
   reasons,
+  toolStatuses,
 }: {
   classification: Classification;
   analysisStatus: AnalysisStatus;
   reasons: string[];
+  toolStatuses?: ToolStatuses;
 }) {
   if (analysisStatus === "unavailable") {
     return (
@@ -194,8 +200,7 @@ function ResultSummary({
   if (analysisStatus === "partial") {
     return (
       <p className="result-summary">
-        Some checks could not finish. Treat this result with caution.
-        {reasons[0] ? ` ${reasons[0]}` : ""}
+        {getPartialAnalysisSummary(reasons, toolStatuses)}
       </p>
     );
   }
@@ -271,17 +276,17 @@ function EvidencePane({ data }: { data: ScanResponse }) {
         <h2 className="evidence-pane__heading">Check status</h2>
         {(
           [
-            ["URL heuristics", data.tool_statuses.heuristics.status],
-            ["Reputation check", data.tool_statuses.reputation.status],
-            ["Content analysis", data.tool_statuses.llm.status],
-          ] as [string, ToolStatusValue][]
-        ).map(([name, status]) => (
+            ["URL heuristics", data.tool_statuses.heuristics],
+            ["Reputation check", data.tool_statuses.reputation],
+            ["Content analysis", data.tool_statuses.llm],
+          ] as [string, ToolStatusDetail][]
+        ).map(([name, detail]) => (
           <div key={name} className="status-table__row">
             <span className="status-table__name">{name}</span>
             <span
-              className={`status-table__value status-table__value--${status}`}
+              className={`status-table__value status-table__value--${detail.status}`}
             >
-              {toolStatusLabel(status)}
+              {getToolStatusLabel(detail)}
             </span>
           </div>
         ))}
@@ -297,12 +302,38 @@ function EvidencePane({ data }: { data: ScanResponse }) {
 
 function ResultCard({
   data,
+  scannedUrl,
   onRescan,
 }: {
   data: ScanResponse;
+  scannedUrl: string;
   onRescan: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [shieldError, setShieldError] = useState<string | null>(null);
+
+  const isHighRisk = isHighRiskScan(data);
+
+  const handleOpenShield = useCallback(async () => {
+    try {
+      setShieldError(null);
+      const targetUrl = scannedUrl || data.target_reference;
+      const warningUrl = createWarningPageUrl({
+        destUrl: targetUrl,
+        riskScore: data.risk_score,
+        reasons: data.reasons,
+        isPartial: data.analysis_status === "partial",
+      });
+      const ok = await openShieldInterstitial(warningUrl);
+      if (!ok) {
+        setShieldError("Could not open shield interstitial tab.");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to open warning page.";
+      setShieldError(msg);
+      console.error("[Popup] Shield interstitial error:", err);
+    }
+  }, [data, scannedUrl]);
 
   const cardVariant =
     data.analysis_status === "unavailable"
@@ -345,6 +376,7 @@ function ResultCard({
         classification={data.classification}
         analysisStatus={data.analysis_status}
         reasons={data.reasons}
+        toolStatuses={data.tool_statuses}
       />
 
       {hasExpandable && (
@@ -362,6 +394,25 @@ function ResultCard({
       {expanded && (
         <div id="evidence-details">
           <EvidencePane data={data} />
+        </div>
+      )}
+
+      {isHighRisk && (
+        <div className="shield-action-container">
+          <button
+            type="button"
+            className="btn btn--shield"
+            onClick={handleOpenShield}
+            aria-label="Open Shield Interstitial to block and review this website"
+          >
+            <ShieldLinkIcon style={{ width: 14, height: 14, color: "#FFFFFF" }} />
+            <span>Open Shield Interstitial</span>
+          </button>
+          {shieldError && (
+            <p className="shield-error-text" role="alert">
+              {shieldError}
+            </p>
+          )}
         </div>
       )}
 
@@ -402,14 +453,232 @@ function ErrorCard({
 }
 
 // ---------------------------------------------------------------------------
+// Surface D: Recent Scans & Settings Subviews
+// ---------------------------------------------------------------------------
+
+interface RecentScansViewProps {
+  onSelectScan: (scan: ScanResponse) => void;
+  onBack: () => void;
+}
+
+function RecentScansView({ onSelectScan, onBack }: RecentScansViewProps) {
+  const [scans, setScans] = useState<ScanResponse[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchScans = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await listRecentScans(20, 0);
+      setScans(data.items);
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : "Unable to load recent scans.";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchScans();
+  }, [fetchScans]);
+
+  return (
+    <div className="subview">
+      <div className="subview-header">
+        <button
+          type="button"
+          className="subview-back-btn"
+          onClick={onBack}
+          aria-label="Back to website scan view"
+        >
+          <span aria-hidden="true">&larr;</span> Back
+        </button>
+        <h2 className="subview-title">Recent scans</h2>
+      </div>
+
+      <div className="subview-body">
+        {loading && (
+          <div
+            className="loading-state"
+            role="status"
+            aria-live="polite"
+            aria-label="Loading recent scans"
+          >
+            <div className="loading-indicator" aria-hidden="true" />
+            <p className="loading-state__heading">Loading scan history…</p>
+          </div>
+        )}
+
+        {!loading && error && (
+          <div className="history-error" role="alert">
+            <p className="history-error__heading">Could not load scan history</p>
+            <p className="history-error__body">{error}</p>
+            <button
+              type="button"
+              className="btn btn--secondary history-retry-btn"
+              onClick={fetchScans}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && scans && scans.length === 0 && (
+          <div className="history-empty" role="status">
+            <h3 className="history-empty__heading">No recent scans</h3>
+            <p className="history-empty__body">Your recent scans will appear here.</p>
+          </div>
+        )}
+
+        {!loading && !error && scans && scans.length > 0 && (
+          <ul className="history-list" aria-label="Recent scans list">
+            {scans.map((scan) => {
+              const domain = formatTargetDomain(scan.target_reference);
+              const classLabel = formatClassificationLabel(scan.classification);
+              const timeLabel = formatScanTime(scan.created_at);
+              const scoreLabel =
+                scan.risk_score !== null ? `Risk score ${scan.risk_score}/100` : "";
+
+              return (
+                <li key={scan.scan_id} className="history-list__item">
+                  <button
+                    type="button"
+                    className="history-card"
+                    onClick={() => onSelectScan(scan)}
+                    aria-label={`View scan details for ${domain}, ${classLabel}, ${scoreLabel || "score unavailable"}`}
+                  >
+                    <div className="history-card__header">
+                      <span
+                        className="history-card__domain tabular-nums"
+                        title={scan.target_reference}
+                      >
+                        {domain}
+                      </span>
+                      <span className="history-card__time tabular-nums">
+                        {timeLabel}
+                      </span>
+                    </div>
+
+                    <div className="history-card__meta">
+                      <span
+                        className={`history-badge history-badge--${scan.classification || "unclassified"}`}
+                      >
+                        {classLabel}
+                      </span>
+
+                      {scan.risk_score !== null && (
+                        <span className="history-card__score tabular-nums">
+                          Score: {scan.risk_score}/100
+                        </span>
+                      )}
+
+                      {scan.analysis_status !== "complete" && (
+                        <span
+                          className={`history-card__status-chip history-card__status-chip--${scan.analysis_status}`}
+                        >
+                          {scan.analysis_status === "partial" ? "Partial" : "Unavailable"}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface SettingsViewProps {
+  onBack: () => void;
+}
+
+function SettingsView({ onBack }: SettingsViewProps) {
+  const [backendOk, setBackendOk] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    checkBackendHealth().then((ok) => setBackendOk(ok));
+  }, []);
+
+  return (
+    <div className="subview">
+      <div className="subview-header">
+        <button
+          type="button"
+          className="subview-back-btn"
+          onClick={onBack}
+          aria-label="Back to website scan view"
+        >
+          <span aria-hidden="true">&larr;</span> Back
+        </button>
+        <h2 className="subview-title">Settings</h2>
+      </div>
+
+      <div className="subview-body settings-body">
+        <div className="settings-section">
+          <h3 className="settings-section__title">Backend service</h3>
+          <div className="settings-row">
+            <span className="settings-label">API status</span>
+            <span
+              className={`settings-status-badge ${
+                backendOk === true
+                  ? "settings-status-badge--connected"
+                  : backendOk === false
+                  ? "settings-status-badge--unavailable"
+                  : ""
+              }`}
+            >
+              {backendOk === null
+                ? "Checking…"
+                : backendOk
+                ? "Connected"
+                : "Unavailable"}
+            </span>
+          </div>
+          <p className="settings-note">
+            Target server: <code>http://127.0.0.1:8000</code>
+          </p>
+        </div>
+
+        <div className="settings-section">
+          <h3 className="settings-section__title">Website scanning</h3>
+          <div className="settings-row">
+            <span className="settings-label">Mode</span>
+            <span className="settings-badge">Manual on-demand</span>
+          </div>
+          <p className="settings-note">
+            Automatic background navigation scanning is disabled in this phase.
+          </p>
+        </div>
+
+        <div className="settings-section">
+          <h3 className="settings-section__title">Privacy notice</h3>
+          <p className="settings-note">
+            Scan history stores result metadata, not full page or email content by default.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Root Popup Component
 // ---------------------------------------------------------------------------
+
+export type ActiveView = "scan" | "recent_scans" | "settings";
 
 export function Popup() {
   const [domain, setDomain] = useState<string>("");
   const [currentUrl, setCurrentUrl] = useState<string>("");
   const [pageTitle, setPageTitle] = useState<string>("");
   const [uiState, setUiState] = useState<PopupUIState>({ kind: "idle" });
+  const [activeView, setActiveView] = useState<ActiveView>("scan");
 
   useEffect(() => {
     getActiveTabInfo().then((info) => {
@@ -433,16 +702,17 @@ export function Popup() {
       return;
     }
 
+    const scannedUrl = currentUrl;
     setUiState({ kind: "scanning" });
 
     try {
       const payload: WebsiteScanRequest = {
-        url: currentUrl,
+        url: scannedUrl,
         source: "manual_website",
         ...(pageTitle ? { page_title: pageTitle } : {}),
       };
       const result = await scanWebsite(payload);
-      setUiState({ kind: "result", data: result });
+      setUiState({ kind: "result", data: result, scannedUrl });
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : "An unknown error occurred.";
@@ -454,78 +724,112 @@ export function Popup() {
     setUiState({ kind: "idle" });
   }, []);
 
+  const handleSelectScan = useCallback((scan: ScanResponse) => {
+    setUiState({
+      kind: "result",
+      data: scan,
+      scannedUrl: scan.target_reference,
+    });
+    setActiveView("scan");
+  }, []);
+
   const canScan = Boolean(currentUrl) && currentUrl.startsWith("http");
 
   return (
     <div className="popup-layout">
       <ProductHeader />
 
-      {domain && domain !== "(not a web page)" && (
+      {activeView === "scan" && domain && domain !== "(not a web page)" && (
         <SiteRow domain={domain} />
       )}
 
-      <main className="content">
-        {uiState.kind === "idle" && (
-          <div className="empty-state">
-            <h1 className="empty-state__heading">Check this website</h1>
-            <p className="empty-state__body">
-              Scan the current page for signals commonly associated with
-              phishing.
-            </p>
-            <button
-              className="btn btn--primary"
-              onClick={handleScan}
-              disabled={!canScan}
-              aria-label="Scan current site for phishing signals"
+      {activeView === "scan" && (
+        <main className="content">
+          {uiState.kind === "idle" && (
+            <div className="empty-state">
+              <h1 className="empty-state__heading">Check this website</h1>
+              <p className="empty-state__body">
+                Scan the current page for signals commonly associated with
+                phishing.
+              </p>
+              <button
+                className="btn btn--primary"
+                onClick={handleScan}
+                disabled={!canScan}
+                aria-label="Scan current site for phishing signals"
+              >
+                Scan current site
+              </button>
+            </div>
+          )}
+
+          {uiState.kind === "scanning" && (
+            <div
+              className="loading-state"
+              role="status"
+              aria-live="polite"
+              aria-label="Scan in progress"
             >
-              Scan current site
-            </button>
-          </div>
-        )}
+              <div className="loading-indicator" aria-hidden="true" />
+              <p className="loading-state__heading">Checking this website…</p>
+              <p className="loading-state__body">
+                Reviewing the page and available reputation signals.
+              </p>
+            </div>
+          )}
 
-        {uiState.kind === "scanning" && (
-          <div
-            className="loading-state"
-            role="status"
-            aria-live="polite"
-            aria-label="Scan in progress"
-          >
-            <div className="loading-indicator" aria-hidden="true" />
-            <p className="loading-state__heading">Checking this website…</p>
-            <p className="loading-state__body">
-              Reviewing the page and available reputation signals.
-            </p>
-          </div>
-        )}
+          {uiState.kind === "result" && (
+            <ResultCard
+              data={uiState.data}
+              scannedUrl={uiState.scannedUrl ?? currentUrl}
+              onRescan={handleReset}
+            />
+          )}
 
-        {uiState.kind === "result" && (
-          <ResultCard data={uiState.data} onRescan={handleReset} />
-        )}
+          {uiState.kind === "connection_error" && (
+            <ErrorCard
+              message={uiState.message}
+              onRetry={handleReset}
+            />
+          )}
+        </main>
+      )}
 
-        {uiState.kind === "connection_error" && (
-          <ErrorCard
-            message={uiState.message}
-            onRetry={handleReset}
+      {activeView === "recent_scans" && (
+        <main className="content content--subview">
+          <RecentScansView
+            onSelectScan={handleSelectScan}
+            onBack={() => setActiveView("scan")}
           />
-        )}
-      </main>
+        </main>
+      )}
+
+      {activeView === "settings" && (
+        <main className="content content--subview">
+          <SettingsView
+            onBack={() => setActiveView("scan")}
+          />
+        </main>
+      )}
 
       <footer className="footer" role="contentinfo">
         <div className="footer__links">
-          <span
-            className="footer__action--disabled"
-            title="Scan history available in Phase 4"
-            aria-disabled="true"
+          <button
+            type="button"
+            className={`footer__action ${activeView === "recent_scans" ? "footer__action--active" : ""}`}
+            onClick={() => setActiveView(activeView === "recent_scans" ? "scan" : "recent_scans")}
+            aria-pressed={activeView === "recent_scans"}
           >
             Recent scans
-          </span>
-          <span
-            className="footer__action--disabled"
-            title="Settings available in Phase 4"
-            aria-disabled="true"
+          </button>
+          <button
+            type="button"
+            className={`footer__action ${activeView === "settings" ? "footer__action--active" : ""}`}
+            onClick={() => setActiveView(activeView === "settings" ? "scan" : "settings")}
+            aria-pressed={activeView === "settings"}
           >
             Settings
-          </span>
+          </button>
         </div>
         <span className="footer__version">v1.0 (Phase 1)</span>
       </footer>
