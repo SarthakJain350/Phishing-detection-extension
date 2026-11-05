@@ -60,7 +60,7 @@ _MODEL_ID = "gemini-3.5-flash-lite"
 _GENERATE_ENDPOINT = f"{_GEMINI_API_BASE}/models/{_MODEL_ID}:generateContent"
 
 # Total budget for one analyze_target call (including any single retry)
-_TOTAL_TIMEOUT_SECONDS = 20.0
+_TOTAL_TIMEOUT_SECONDS = 8.0
 
 # Minimum time remaining (seconds) required before attempting a retry
 _MIN_TIME_FOR_RETRY = 1.0

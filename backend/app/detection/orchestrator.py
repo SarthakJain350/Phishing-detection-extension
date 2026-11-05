@@ -7,6 +7,7 @@ import abc
 from dataclasses import dataclass
 import logging
 import time
+from typing import TYPE_CHECKING, Any
 
 from backend.app.detection.heuristics import DeterministicHeuristicsEngine
 from backend.app.providers.gemini import GeminiAdapter
@@ -15,6 +16,9 @@ from backend.app.schemas.scan import (
     ToolStatusDetail,
     ToolStatuses,
 )
+
+if TYPE_CHECKING:
+    from backend.app.providers.safe_browsing import SafeBrowsingAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +40,14 @@ class BaseDetectionOrchestrator(abc.ABC):
 
     @abc.abstractmethod
     def analyze_website(
-        self,
-        *,
-        url: str,
-        target_reference: str,
-        page_title: str | None = None,
-        visible_text: str | None = None,
-    ) -> DetectionResult:
+    self,
+    *,
+    url: str,
+    target_reference: str,
+    page_title: str | None = None,
+    visible_text: str | None = None,
+    opt_in_gemini: bool = True,
+) -> DetectionResult:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -54,6 +59,7 @@ class BaseDetectionOrchestrator(abc.ABC):
         body_text: str | None = None,
         links: list[str] | None = None,
         primary_domain: str = "email-scan",
+        opt_in_gemini: bool = False,
     ) -> DetectionResult:
         raise NotImplementedError
 
@@ -65,7 +71,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         self,
         heuristics: DeterministicHeuristicsEngine | None = None,
         gemini: GeminiAdapter | None = None,
-        reputation: Any | None = None,
+        reputation: SafeBrowsingAdapter | Any | None = None,
     ) -> None:
         self._heuristics = heuristics or DeterministicHeuristicsEngine()
         self._gemini = gemini or GeminiAdapter()
@@ -97,6 +103,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         llm_result,
         llm_status: ToolStatusDetail,
         reputation_status: ToolStatusDetail | None = None,
+        reputation_evidence: list[EvidenceItem] | None = None,
     ) -> DetectionResult:
         if reputation_status is None:
             reputation_status = ToolStatusDetail(
@@ -104,7 +111,32 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
                 reason_code="provider_not_integrated",
             )
 
-        heuristic_score = self._heuristic_score(evidence)
+        # ---------------------------------------------------------------------------
+        # Scoring rule: merge reputation evidence with heuristic evidence.
+        #
+        # Aggregation design:
+        #   - Reputation evidence (source="reputation") is appended to heuristic
+        #     evidence ONLY when the provider completed successfully and returned
+        #     findings. The combined list is scored by _heuristic_score() as a unit.
+        #   - A single "high" severity reputation hit adds 75 base points.
+        #     Combined with the additional_findings bonus this can reach up to 80,
+        #     sufficient to cross the phishing threshold (>= 70).
+        #   - Provider failure / timeout / unavailable -> empty list -> no score
+        #     impact. A failed lookup is NEVER treated as clean evidence.
+        #   - Double-counting is avoided: reputation items carry source="reputation"
+        #     (distinct from source="heuristics"), and both sets are merged before
+        #     a single call to _heuristic_score(). The LLM score is combined via
+        #     max() and cannot lower a score already raised by reputation.
+        #   - The final score is clamped to 0-100 before returning.
+        # ---------------------------------------------------------------------------
+        rep_items = (
+            [item for item in reputation_evidence if isinstance(item, EvidenceItem)]
+            if isinstance(reputation_evidence, list)
+            else []
+        )
+        all_evidence: list[EvidenceItem] = list(evidence) + rep_items
+
+        heuristic_score = self._heuristic_score(all_evidence)
         llm_score = llm_result.risk_score if llm_result is not None else None
 
         if heuristic_score is None and llm_score is None:
@@ -122,6 +154,10 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             elif llm_status.reason_code == "no_api_key":
                 unavail_reasons.append(
                     "Content analysis is not configured."
+                )
+            elif llm_status.reason_code == "opt_in_required":
+                unavail_reasons.append(
+                    "External AI content analysis is disabled (opt-in required)."
                 )
 
             if reputation_status.reason_code == "provider_not_integrated":
@@ -141,7 +177,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
                 classification=None,
                 risk_score=None,
                 reasons=unavail_reasons,
-                evidence=evidence,
+                evidence=all_evidence,
                 tool_statuses=ToolStatuses(
                     heuristics=ToolStatusDetail(status="complete"),
                     reputation=reputation_status,
@@ -162,10 +198,10 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         assert score is not None
         classification = self._classification_for_score(
             score,
-            has_evidence=bool(evidence),
+            has_evidence=bool(all_evidence),
         )
 
-        reasons = [item.explanation for item in evidence if item.explanation]
+        reasons = [item.explanation for item in all_evidence if item.explanation]
 
         if llm_result is not None:
             reasons.extend(
@@ -224,7 +260,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             classification=classification,
             risk_score=max(0, min(100, score)),
             reasons=reasons,
-            evidence=evidence,
+            evidence=all_evidence,
             tool_statuses=ToolStatuses(
                 heuristics=ToolStatusDetail(status="complete"),
                 reputation=reputation_status,
@@ -234,12 +270,13 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         )
 
     def analyze_website(
-        self,
-        *,
-        url: str,
-        target_reference: str,
-        page_title: str | None = None,
-        visible_text: str | None = None,
+    self,
+    *,
+    url: str,
+    target_reference: str,
+    page_title: str | None = None,
+    visible_text: str | None = None,
+    opt_in_gemini: bool = True,
     ) -> DetectionResult:
         started = time.monotonic()
 
@@ -251,25 +288,37 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         )
         logger.debug("Heuristics evaluation completed in %.2fs", time.monotonic() - started)
 
-        started = time.monotonic()
-        llm_result, llm_status = self._gemini.analyze_target(
-            target_type="website",
-            url_or_domain=target_reference,
-            title=page_title,
-            text=visible_text,
-        )
-        logger.debug("Gemini analysis completed in %.2fs", time.monotonic() - started)
+        if opt_in_gemini:
+            started = time.monotonic()
+            llm_result, llm_status = self._gemini.analyze_target(
+                target_type="website",
+                url_or_domain=target_reference,
+                title=page_title,
+                text=visible_text,
+            )
+            logger.debug("Gemini analysis completed in %.2fs", time.monotonic() - started)
+        else:
+            llm_result = None
+            llm_status = ToolStatusDetail(
+                status="unavailable",
+                reason_code="opt_in_required",
+            )
 
         reputation_status: ToolStatusDetail
+        reputation_evidence: list[EvidenceItem] = []
         if self._reputation is not None:
             started = time.monotonic()
             try:
-                _, reputation_status = self._reputation.check_reputation(
+                rep_result, reputation_status = self._reputation.check_reputation(
                     target_reference=target_reference,
                     url=url,
                 )
+                reputation_evidence = (
+                    rep_result if isinstance(rep_result, list) else []
+                )
             except Exception as exc:
-                logger.warning("Reputation provider raised exception: %s", exc)
+                logger.warning("Reputation provider raised exception: %s", type(exc).__name__)
+                reputation_evidence = []
                 reputation_status = ToolStatusDetail(
                     status="error",
                     reason_code="provider_exception",
@@ -287,6 +336,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             llm_result=llm_result,
             llm_status=llm_status,
             reputation_status=reputation_status,
+            reputation_evidence=reputation_evidence,
         )
         logger.debug("Evidence combination completed in %.2fs", time.monotonic() - started)
 
@@ -328,24 +378,12 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             text=llm_text or None,
         )
 
-        reputation_status: ToolStatusDetail
-        if self._reputation is not None:
-            try:
-                _, reputation_status = self._reputation.check_reputation(
-                    target_reference=primary_domain,
-                    url=primary_domain,
-                )
-            except Exception as exc:
-                logger.warning("Reputation provider raised exception: %s", exc)
-                reputation_status = ToolStatusDetail(
-                    status="error",
-                    reason_code="provider_exception",
-                )
-        else:
-            reputation_status = ToolStatusDetail(
-                status="unavailable",
-                reason_code="provider_not_integrated",
-            )
+        # Phase 1: Email reputation integration is strictly out of scope.
+        # Email scans must not invoke the website reputation adapter.
+        reputation_status = ToolStatusDetail(
+            status="unavailable",
+            reason_code="provider_not_integrated",
+        )
 
         return self._combine(
             evidence=evidence,

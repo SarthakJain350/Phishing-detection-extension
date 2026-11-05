@@ -17,6 +17,7 @@ from backend.app.detection.orchestrator import (
     BaseDetectionOrchestrator,
     RealDetectionOrchestrator,
 )
+from backend.app.providers.safe_browsing import SafeBrowsingAdapter
 from backend.app.schemas.scan import (
     EmailScanRequest,
     EvidenceItem,
@@ -30,8 +31,23 @@ logger = logging.getLogger("phishing_detector")
 
 router = APIRouter(prefix="/scans", tags=["Scans"])
 
+
+def _build_default_orchestrator() -> BaseDetectionOrchestrator:
+    """Build the production orchestrator, enabling reputation only when key is present.
+
+    When SAFE_BROWSING_API_KEY is absent or empty, the reputation adapter is not
+    constructed and the orchestrator uses provider_not_integrated semantics.
+    This ensures the feature is disabled by default and enabled only when
+    explicitly configured.
+    """
+    from backend.app.core.config import settings
+
+    reputation = SafeBrowsingAdapter() if settings.SAFE_BROWSING_API_KEY else None
+    return RealDetectionOrchestrator(reputation=reputation)
+
+
 # Default orchestrator instance (can be overridden in tests or future phases)
-_default_orchestrator: BaseDetectionOrchestrator = RealDetectionOrchestrator()
+_default_orchestrator: BaseDetectionOrchestrator = _build_default_orchestrator()
 
 
 def get_orchestrator() -> BaseDetectionOrchestrator:
@@ -110,11 +126,13 @@ def scan_website(
         ) from exc
 
     # Run orchestrator
+    # Run orchestrator
     result = orchestrator.analyze_website(
         url=payload.url,
         target_reference=target_reference,
         page_title=payload.page_title,
         visible_text=payload.visible_text,
+        opt_in_gemini=payload.opt_in_gemini,
     )
 
     # Persist record (never persists raw full URL or visible text)

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.app.api.v1.router import api_v1_router
+from backend.app.api.v1.health import router as health_router
 from backend.app.core.config import settings
 
 logger = logging.getLogger("phishing_detector")
@@ -124,3 +125,5 @@ async def generic_exception_handler(
 # Include API Routers
 # ------------------------------------------------------------------------------
 app.include_router(api_v1_router)
+# Expose health endpoints at root level for extension compatibility (alias)
+app.include_router(health_router)

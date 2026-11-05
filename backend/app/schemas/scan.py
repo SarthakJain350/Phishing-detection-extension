@@ -36,6 +36,10 @@ class WebsiteScanRequest(BaseModel):
         default="manual_website",
         description="Origin of scan trigger.",
     )
+    opt_in_gemini: bool = Field(
+        default=True,
+        description="Whether to include optional Gemini LLM analysis. When False, analysis is purely local/deterministic.",
+    )
 
     @field_validator("url")
     @classmethod
@@ -87,6 +91,10 @@ class EmailScanRequest(BaseModel):
     source: Literal["gmail"] = Field(
         default="gmail",
         description="Source of email scan.",
+    )
+    opt_in_gemini: bool = Field(
+        default=False,
+        description="Explicit opt-in to send email content to external Gemini LLM. False by default to keep email analysis 100% local.",
     )
 
     @field_validator("links")

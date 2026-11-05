@@ -657,7 +657,7 @@ class TestSafeBrowsingAndScoringBehavior:
 
         class CompleteReputation:
             def check_reputation(self, **kwargs):
-                return {"reputation": "clean"}, ToolStatusDetail(status="complete")
+                return [], ToolStatusDetail(status="complete")
 
         class CompleteGemini:
             def analyze_target(self, **kwargs):
@@ -684,3 +684,502 @@ class TestSafeBrowsingAndScoringBehavior:
         assert result.tool_statuses.heuristics.status == "complete"
         assert result.tool_statuses.llm.status == "complete"
         assert result.tool_statuses.reputation.status == "complete"
+
+
+class TestReputationIntegration:
+    """Integration tests for the Safe Browsing reputation adapter wired into the orchestrator.
+
+    All reputation calls use duck-typed stubs from conftest.py — no live network calls.
+    """
+
+    PHISHING_URL = "https://evil-phishing.example.com/login?token=steal"
+    CLEAN_URL = "https://www.google.com/search?q=test"
+
+    # -----------------------------------------------------------------------
+    # 8. Reputation evidence affecting final classification
+    # -----------------------------------------------------------------------
+
+    def test_reputation_threat_promotes_classification_to_phishing(self, client):
+        """When ThreatReputation returns high-severity evidence, classification becomes 'phishing'
+        even when heuristics are clean and the LLM sees low risk.
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+        from backend.tests.conftest import ThreatReputation
+
+        class LowRiskGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="likely_legitimate",
+                        risk_score=10,
+                        reasons=["No obvious indicators."],
+                        confidence_label="low",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=LowRiskGemini(),
+            reputation=ThreatReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": self.PHISHING_URL, "source": "manual_website"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["classification"] == "phishing"
+            assert data["risk_score"] >= 70
+            assert data["tool_statuses"]["reputation"]["status"] == "complete"
+            assert data["analysis_status"] == "complete"
+
+            rep_evidence = [e for e in data["evidence"] if e["source"] == "reputation"]
+            assert len(rep_evidence) >= 1
+            assert rep_evidence[0]["type"] == "reputation_threat"
+            assert rep_evidence[0]["severity"] == "high"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_clean_reputation_with_heuristic_evidence_preserves_heuristic_score(self, client):
+        """When reputation is clean, heuristic evidence still drives classification."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+        from backend.tests.conftest import CleanReputation
+
+        deceptive_url = "https://paypal.com.phish-login.example.com/verify"
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=type("UG", (), {"analyze_target": lambda s, **kw: (None, ToolStatusDetail(status="unavailable", reason_code="test_disabled"))})(),
+            reputation=CleanReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": deceptive_url, "source": "manual_website"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["tool_statuses"]["reputation"]["status"] == "complete"
+            assert data["classification"] in {"phishing", "suspicious"}
+            rep_evidence = [e for e in data["evidence"] if e["source"] == "reputation"]
+            assert rep_evidence == []
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    # -----------------------------------------------------------------------
+    # 9. Provider failure — never produces falsely safe result
+    # -----------------------------------------------------------------------
+
+    def test_reputation_timeout_produces_partial_not_falsely_safe(self, client):
+        """When reputation times out, analysis_status='partial' — never 'complete'."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class TimingOutReputation:
+            def check_reputation(self, **kwargs):
+                return [], ToolStatusDetail(status="timeout", reason_code="request_timeout")
+
+        class LowRiskGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="likely_legitimate",
+                        risk_score=5,
+                        reasons=["Appears clean."],
+                        confidence_label="low",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=LowRiskGemini(),
+            reputation=TimingOutReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": self.CLEAN_URL, "source": "manual_website"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "partial"
+            assert data["tool_statuses"]["reputation"]["status"] == "timeout"
+            assert any("Reputation lookup timed out" in r for r in data["reasons"])
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_provider_exception_produces_partial_not_crash(self, client):
+        """When the reputation provider raises an unexpected exception, return partial safely."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class ExplodingReputation:
+            def check_reputation(self, **kwargs):
+                raise RuntimeError("Unexpected provider crash")
+
+        class LowRiskGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="likely_legitimate",
+                        risk_score=5,
+                        reasons=["Appears clean."],
+                        confidence_label="low",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=LowRiskGemini(),
+            reputation=ExplodingReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": self.CLEAN_URL, "source": "manual_website"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "partial"
+            assert data["tool_statuses"]["reputation"]["status"] == "error"
+            assert data["tool_statuses"]["reputation"]["reason_code"] == "provider_exception"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    # -----------------------------------------------------------------------
+    # 10. Website endpoint — backward compatibility
+    # -----------------------------------------------------------------------
+
+    def test_website_endpoint_backward_compatible_without_reputation(self, client):
+        """The default client fixture (no reputation key) must still return 200
+        with provider_not_integrated."""
+        response = client.post(
+            "/api/v1/scans/website",
+            json={"url": "https://example.com/login", "source": "manual_website"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "scan_id" in data
+        assert "tool_statuses" in data
+        assert "reputation" in data["tool_statuses"]
+        assert data["tool_statuses"]["reputation"]["status"] == "unavailable"
+        assert data["tool_statuses"]["reputation"]["reason_code"] == "provider_not_integrated"
+
+    def test_website_scan_with_complete_reputation_returns_complete_analysis(self, client):
+        """When all providers complete, analysis_status must be 'complete'."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+        from backend.tests.conftest import CleanReputation
+
+        class CompleteGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="likely_legitimate",
+                        risk_score=5,
+                        reasons=["Clean signals."],
+                        confidence_label="high",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=CompleteGemini(),
+            reputation=CleanReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": self.CLEAN_URL, "source": "manual_website"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "complete"
+            assert data["tool_statuses"]["reputation"]["status"] == "complete"
+            assert data["tool_statuses"]["llm"]["status"] == "complete"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+    def test_website_scan_skips_gemini_when_opted_out(self, client):
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.tests.conftest import CleanReputation
+
+        class SpyGemini:
+            def __init__(self):
+                self.called = False
+
+            def analyze_target(self, **kwargs):
+                self.called = True
+                raise AssertionError("Gemini should not be called")
+
+        gemini = SpyGemini()
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=gemini,
+            reputation=CleanReputation(),
+        )
+
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={
+                    "url": "https://example.com/login",
+                    "source": "manual_website",
+                    "opt_in_gemini": False,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert gemini.called is False
+            assert data["tool_statuses"]["heuristics"]["status"] == "complete"
+            assert data["tool_statuses"]["llm"]["status"] == "unavailable"
+            assert data["tool_statuses"]["llm"]["reason_code"] == "opt_in_required"
+
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+    def test_website_scan_preserves_heuristics_when_gemini_times_out(self, client):
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+        from backend.tests.conftest import CleanReputation
+
+        class TimingOutGemini:
+            def analyze_target(self, **kwargs):
+                return None, ToolStatusDetail(
+                    status="timeout",
+                    reason_code="request_timeout",
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=TimingOutGemini(),
+            reputation=CleanReputation(),
+        )
+
+        try:
+            response = client.post(
+                "/api/v1/scans/website",
+                json={
+                    "url": "https://example.com/login",
+                    "source": "manual_website",
+                    "opt_in_gemini": True,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["tool_statuses"]["heuristics"]["status"] == "complete"
+            assert data["tool_statuses"]["llm"]["status"] == "timeout"
+            assert data["tool_statuses"]["llm"]["reason_code"] == "request_timeout"
+
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    # -----------------------------------------------------------------------
+    # 11. Email scans remain unchanged in Phase 1
+    # -----------------------------------------------------------------------
+
+    def test_email_scan_uses_provider_not_integrated_with_default_fixture(self, client):
+        """Default client fixture has no reputation key; email scans must use
+        provider_not_integrated — confirming email reputation is out of scope."""
+        response = client.post(
+            "/api/v1/scans/email",
+            json={
+                "sender": "noreply@legitimate.com",
+                "subject": "Your account statement",
+                "body_text": "Please find your statement attached.",
+                "links": ["https://legitimate.com/statement"],
+                "source": "gmail",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["tool_statuses"]["reputation"]["status"] == "unavailable"
+        assert data["tool_statuses"]["reputation"]["reason_code"] == "provider_not_integrated"
+
+    def test_email_scan_token_not_forwarded_to_reputation(self, client):
+        """Phase 1: Email path must never forward full email link URLs with tokens
+        to the reputation provider."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        forwarded_urls: list[str] = []
+
+        class RecordingReputation:
+            def check_reputation(self, **kwargs):
+                forwarded_urls.append(kwargs.get("url", ""))
+                return [], ToolStatusDetail(status="complete")
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=type("UG", (), {"analyze_target": lambda s, **kw: (None, ToolStatusDetail(status="unavailable", reason_code="test_disabled"))})(),
+            reputation=RecordingReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": "phish@evil.com",
+                    "subject": "Urgent: verify account",
+                    "body_text": "Click now: https://evil.com/steal?token=abc",
+                    "links": ["https://evil.com/steal?token=abc"],
+                    "source": "gmail",
+                },
+            )
+            assert response.status_code == 200
+            for url in forwarded_urls:
+                assert "token=abc" not in url, (
+                    f"Sensitive email token was forwarded to reputation: {url}"
+                )
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_never_invokes_reputation_adapter(self, client):
+        """Phase 1: analyze_email must not invoke the reputation adapter even if configured."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class FailIfCalledReputation:
+            def check_reputation(self, **kwargs):
+                raise AssertionError("Email scan must not invoke reputation adapter in Phase 1")
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=type("UG", (), {"analyze_target": lambda s, **kw: (None, ToolStatusDetail(status="unavailable", reason_code="test_disabled"))})(),
+            reputation=FailIfCalledReputation(),
+        )
+        try:
+            response = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": "alert@bank.com",
+                    "subject": "Statement Ready",
+                    "body_text": "Please check your statement.",
+                    "links": ["https://bank.com/statement"],
+                    "source": "gmail",
+                },
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["tool_statuses"]["reputation"]["status"] == "unavailable"
+            assert data["tool_statuses"]["reputation"]["reason_code"] == "provider_not_integrated"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    # -----------------------------------------------------------------------
+    # Orchestrator unit: scoring invariants
+    # -----------------------------------------------------------------------
+
+    def test_reputation_threat_evidence_scores_at_or_above_phishing_threshold(self):
+        """A single high-severity reputation EvidenceItem must produce score >= 70."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        reputation_evidence = [
+            EvidenceItem(
+                type="reputation_threat",
+                source="reputation",
+                severity="high",
+                explanation="Safe Browsing flagged as social engineering.",
+            )
+        ]
+
+        result = orch._combine(
+            evidence=[],
+            llm_result=None,
+            llm_status=ToolStatusDetail(status="unavailable", reason_code="test_disabled"),
+            reputation_status=ToolStatusDetail(status="complete"),
+            reputation_evidence=reputation_evidence,
+        )
+
+        assert result.risk_score is not None
+        assert result.risk_score >= 70
+        assert result.classification == "phishing"
+
+    def test_score_clamped_to_100_with_many_evidence_items(self):
+        """Score must not exceed 100 even with many high-severity evidence items."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        many_evidence = [
+            EvidenceItem(
+                type="reputation_threat",
+                source="reputation",
+                severity="high",
+                explanation=f"Threat signal {i}.",
+            )
+            for i in range(20)
+        ]
+
+        result = orch._combine(
+            evidence=[],
+            llm_result=GeminiAnalysisResult(
+                classification="phishing",
+                risk_score=95,
+                reasons=["Phishing detected."],
+                confidence_label="high",
+            ),
+            llm_status=ToolStatusDetail(status="complete"),
+            reputation_status=ToolStatusDetail(status="complete"),
+            reputation_evidence=many_evidence,
+        )
+
+        assert result.risk_score is not None
+        assert 0 <= result.risk_score <= 100
+
+    def test_failed_lookup_produces_same_score_as_no_reputation(self):
+        """When reputation fails, the risk score must be identical to no-reputation baseline."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        llm_result = GeminiAnalysisResult(
+            classification="likely_legitimate",
+            risk_score=5,
+            reasons=["Clean."],
+            confidence_label="low",
+        )
+        llm_status = ToolStatusDetail(status="complete")
+
+        result_with_failure = orch._combine(
+            evidence=[],
+            llm_result=llm_result,
+            llm_status=llm_status,
+            reputation_status=ToolStatusDetail(status="timeout", reason_code="request_timeout"),
+            reputation_evidence=[],
+        )
+        result_without_reputation = orch._combine(
+            evidence=[],
+            llm_result=llm_result,
+            llm_status=llm_status,
+            reputation_status=ToolStatusDetail(
+                status="unavailable", reason_code="provider_not_integrated"
+            ),
+            reputation_evidence=[],
+        )
+
+        assert result_with_failure.risk_score == result_without_reputation.risk_score
+        assert result_with_failure.classification == result_without_reputation.classification

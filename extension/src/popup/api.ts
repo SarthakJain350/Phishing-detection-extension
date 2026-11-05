@@ -2,6 +2,7 @@ import type { ScanListResponse, ScanResponse, WebsiteScanRequest } from "./types
 import { API_BASE_URL } from "./types.ts";
 
 export const REQUEST_TIMEOUT_MS = 5_000;
+export const SCAN_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * POST /api/v1/scans/website
@@ -18,7 +19,7 @@ export async function scanWebsite(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(SCAN_REQUEST_TIMEOUT_MS),
     });
   } catch (err: unknown) {
     if (
@@ -26,7 +27,7 @@ export async function scanWebsite(
       (err.name === "TimeoutError" || err.name === "AbortError")
     ) {
       throw new Error(
-        "The request timed out after 5 seconds. The backend may be unavailable or slow to respond."
+        "The request timed out after 30 seconds. The backend may be unavailable or slow to respond."
       );
     }
     if (err instanceof TypeError) {
@@ -120,7 +121,8 @@ export async function listRecentScans(
  */
 export async function checkBackendHealth(): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/health`, {
+    // Use the root health alias (no /api/v1 prefix) to avoid extra path length.
+    const res = await fetch(`${API_BASE_URL}/health`, {
       signal: AbortSignal.timeout(5_000),
     });
     return res.ok;

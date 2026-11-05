@@ -63,6 +63,37 @@ function hostnameFromUrl(url: string): string {
 // Atomic Components (Quiet Security Editorial Layout)
 // ---------------------------------------------------------------------------
 
+function BackendStatus() {
+  const [connected, setConnected] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const doCheck = async () => {
+      const ok = await checkBackendHealth();
+      if (!cancelled) setConnected(ok);
+    };
+    // Initial check
+    doCheck();
+    // Periodic check (every 30 s) – balances freshness vs request volume
+    const intervalId = setInterval(doCheck, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  const isOk = connected === true;
+  const icon = isOk ? <CheckIcon style={{ color: 'var(--color-teal)' }} /> : <UnavailableIcon style={{ color: 'var(--color-red)' }} />;
+  const label = isOk ? 'Backend Connected' : 'Backend Disconnected';
+
+  return (
+    <div className="backend-status" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem' }}>
+      {icon}
+      <span>{label}</span>
+    </div>
+  );
+}
+
 function ProductHeader() {
   return (
     <header className="header" role="banner">
@@ -742,7 +773,6 @@ export function Popup() {
       {activeView === "scan" && domain && domain !== "(not a web page)" && (
         <SiteRow domain={domain} />
       )}
-
       {activeView === "scan" && (
         <main className="content">
           {uiState.kind === "idle" && (
@@ -812,8 +842,9 @@ export function Popup() {
         </main>
       )}
 
-      <footer className="footer" role="contentinfo">
-        <div className="footer__links">
+          <footer className="footer" role="contentinfo">
+          <BackendStatus />
+          <div className="footer__links">
           <button
             type="button"
             className={`footer__action ${activeView === "recent_scans" ? "footer__action--active" : ""}`}

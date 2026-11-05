@@ -92,27 +92,47 @@ flowchart TD
 - Docker & Docker Compose (optional for local SQLite testing, required for live PostgreSQL)
 
 ### Backend Setup
-1. Create and activate a Python virtual environment:
+
+1. Create a Python virtual environment:
+
    ```bash
    python -m venv .venv
-   # Windows PowerShell:
+   ```
+
+2. Activate the virtual environment:
+
+   **Windows PowerShell:**
+   ```powershell
    .venv\Scripts\Activate.ps1
-   # Linux/macOS:
+   ```
+
+   **Linux/macOS:**
+   ```bash
    source .venv/bin/activate
    ```
-2. Install dependencies:
+
+3. Install dependencies:
+
    ```bash
    pip install -r backend/requirements.txt -r backend/requirements-dev.txt
    ```
-3. Configure environment:
+
+4. Configure environment:
+
    ```bash
    cp .env.example .env
    ```
-4. Run the API server locally:
+
+   **Note:** The backend exposes health checks at both `/api/v1/health` (original) and `/health` (alias for Chrome extension compatibility). Both return `{"status":"ok"}`.
+
+5. Run the API server locally:
+
    ```bash
    uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
    ```
+
    API interactive documentation will be available at `http://127.0.0.1:8000/docs`.
+
 
 ### Extension Setup & Build
 1. Navigate to the `extension/` directory and install dependencies:

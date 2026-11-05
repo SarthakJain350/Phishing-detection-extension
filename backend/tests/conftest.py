@@ -7,7 +7,7 @@ import sys
 from collections.abc import Generator
 from backend.app.api.v1.scans import get_orchestrator
 from backend.app.detection.orchestrator import RealDetectionOrchestrator
-from backend.app.schemas.scan import ToolStatusDetail
+from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -31,6 +31,41 @@ class UnavailableGemini:
             status="unavailable",
             reason_code="test_provider_disabled",
         )
+
+
+class UnavailableReputation:
+    """Test stub: reputation provider not integrated (default test state)."""
+
+    def check_reputation(self, **kwargs):
+        return [], ToolStatusDetail(
+            status="unavailable",
+            reason_code="provider_not_integrated",
+        )
+
+
+class CleanReputation:
+    """Test stub: reputation lookup completes with no threats found."""
+
+    def check_reputation(self, **kwargs):
+        return [], ToolStatusDetail(status="complete")
+
+
+class ThreatReputation:
+    """Test stub: reputation lookup completes and flags a SOCIAL_ENGINEERING threat."""
+
+    def check_reputation(self, **kwargs):
+        evidence = [
+            EvidenceItem(
+                type="reputation_threat",
+                source="reputation",
+                severity="high",
+                explanation=(
+                    "Google Safe Browsing flagged this URL as social engineering / phishing. "
+                    "This is a strong signal of malicious intent."
+                ),
+            )
+        ]
+        return evidence, ToolStatusDetail(status="complete")
 
 
 @pytest.fixture(scope="session")
@@ -76,7 +111,10 @@ def client(sqlite_session) -> Generator[TestClient, None, None]:
         yield sqlite_session
 
     def override_get_orchestrator():
-        return RealDetectionOrchestrator(gemini=UnavailableGemini())
+        return RealDetectionOrchestrator(
+            gemini=UnavailableGemini(),
+            reputation=UnavailableReputation(),
+        )
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_orchestrator] = override_get_orchestrator
