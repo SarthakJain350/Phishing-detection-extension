@@ -115,6 +115,65 @@ export async function listRecentScans(
   return response.json() as Promise<ScanListResponse>;
 }
 
+export async function clearScanHistory(): Promise<{
+  message: string;
+  deleted_count: number;
+}> {
+  let response: Response;
+
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/scans`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err: unknown) {
+    if (
+      err instanceof DOMException &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new Error(
+        "The request timed out after 5 seconds. Please try again."
+      );
+    }
+
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Could not connect to the backend. Make sure the API server is running."
+      );
+    }
+
+    throw new Error(
+      "An unexpected error occurred while clearing scan history."
+    );
+  }
+
+  if (!response.ok) {
+    let errorMessage = `Backend returned HTTP ${response.status}.`;
+
+    try {
+      const body = (await response.json()) as {
+        detail?: string;
+        error?: { message?: string };
+      };
+
+      errorMessage =
+        body?.detail ||
+        body?.error?.message ||
+        errorMessage;
+    } catch {
+      errorMessage = `Backend error: ${response.status} ${response.statusText}`;
+    }
+
+    throw new Error(errorMessage);
+  }
+
+  return response.json() as Promise<{
+    message: string;
+    deleted_count: number;
+  }>;
+}
+
 /**
  * GET /api/v1/health
  * Returns true if the backend liveness check passes.

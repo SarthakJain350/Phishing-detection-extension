@@ -8,7 +8,12 @@ import type {
   ToolStatusDetail,
   ToolStatuses,
 } from "./types";
-import { scanWebsite, listRecentScans, checkBackendHealth } from "./api";
+import {
+  scanWebsite,
+  listRecentScans,
+  clearScanHistory,
+  checkBackendHealth,
+} from "./api";
 import {
   isHighRiskScan,
   createWarningPageUrl,
@@ -496,6 +501,7 @@ function RecentScansView({ onSelectScan, onBack }: RecentScansViewProps) {
   const [scans, setScans] = useState<ScanResponse[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
 
   const fetchScans = useCallback(async () => {
     setLoading(true);
@@ -511,7 +517,29 @@ function RecentScansView({ onSelectScan, onBack }: RecentScansViewProps) {
       setLoading(false);
     }
   }, []);
+  const handleClearHistory = async () => {
+    const confirmed = window.confirm(
+      "Are you sure you want to permanently delete all scan history?"
+    );
 
+    if (!confirmed) return;
+
+    setClearing(true);
+    setError(null);
+
+    try {
+      await clearScanHistory();
+      await fetchScans();
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+         ? err.message
+         : "Unable to clear scan history."
+      );
+    } finally {
+      setClearing(false);
+    }
+  };
   useEffect(() => {
     fetchScans();
   }, [fetchScans]);
@@ -519,16 +547,28 @@ function RecentScansView({ onSelectScan, onBack }: RecentScansViewProps) {
   return (
     <div className="subview">
       <div className="subview-header">
-        <button
-          type="button"
-          className="subview-back-btn"
-          onClick={onBack}
-          aria-label="Back to website scan view"
-        >
-          <span aria-hidden="true">&larr;</span> Back
-        </button>
-        <h2 className="subview-title">Recent scans</h2>
-      </div>
+  <button
+    type="button"
+    className="subview-back-btn"
+    onClick={onBack}
+    aria-label="Back to website scan view"
+  >
+    <span aria-hidden="true">&larr;</span> Back
+  </button>
+
+  <h2 className="subview-title">Recent scans</h2>
+
+  {!loading && scans && scans.length > 0 && (
+    <button
+      type="button"
+      className="btn btn--secondary"
+      onClick={handleClearHistory}
+      disabled={clearing}
+    >
+      {clearing ? "Clearing..." : "Clear History"}
+    </button>
+  )}
+</div>
 
       <div className="subview-body">
         {loading && (

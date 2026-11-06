@@ -1,11 +1,13 @@
+
 """Repository layer for persisting and retrieving ScanRecord entities."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import ScanRecord
@@ -69,11 +71,9 @@ class ScanRepository:
         Returns:
             (items, total_count)
         """
-        # Count total
         count_stmt = select(func.count(ScanRecord.id))
         total = db.scalar(count_stmt) or 0
 
-        # Query items
         stmt = (
             select(ScanRecord)
             .order_by(ScanRecord.created_at.desc())
@@ -82,3 +82,18 @@ class ScanRepository:
         )
         items = list(db.scalars(stmt).all())
         return items, total
+
+    @staticmethod
+    def delete_all_scans(db: Session) -> int:
+        """Delete all scan records and return the number deleted."""
+        result = db.execute(delete(ScanRecord))
+        db.commit()
+        return result.rowcount or 0
+
+    @staticmethod
+    def delete_expired_scans(db: Session, *, older_than: datetime) -> int:
+        """Delete scans created before the supplied cutoff and return the count."""
+        stmt = delete(ScanRecord).where(ScanRecord.created_at < older_than)
+        result = db.execute(stmt)
+        db.commit()
+        return result.rowcount or 0

@@ -227,6 +227,25 @@ def list_scans(
         offset=offset,
     )
 
+@router.delete("", summary="Clear all scan history")
+def clear_scan_history(
+    db: Session = Depends(get_db),
+) -> dict[str, int | str]:
+    """Delete all stored scan records."""
+    try:
+        deleted_count = ScanRepository.delete_all_scans(db)
+    except Exception as exc:
+        logger.error("Failed to clear scan history: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scan history could not be cleared. Please try again shortly.",
+        ) from exc
+
+    return {
+        "message": "Scan history cleared successfully.",
+        "deleted_count": deleted_count,
+    }
+
 
 @router.get("/{scan_id}", response_model=ScanResponse, summary="Retrieve a stored scan by UUID")
 def get_scan(

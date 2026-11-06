@@ -265,6 +265,37 @@ class TestScanHistoryAndPagination:
         # offset=-1 -> 400
         assert client.get("/api/v1/scans?offset=-1").status_code == 400
 
+    
+    def test_clear_scan_history(self, client):
+        # Create test scans
+        for i in range(3):
+            response = client.post(
+                "/api/v1/scans/website",
+                json={"url": f"https://clear-test-{i}.com"},
+            )
+            assert response.status_code == 200
+
+        # Clear all scan history
+        delete_response = client.delete("/api/v1/scans")
+        assert delete_response.status_code == 200
+
+        data = delete_response.json()
+        assert data["message"] == "Scan history cleared successfully."
+        assert data["deleted_count"] == 3
+        history_response = client.get("/api/v1/scans")
+        assert history_response.status_code == 200
+        assert history_response.json()["total"] == 0
+        # Verify history is empty
+        history_response = client.get("/api/v1/scans")
+        assert history_response.status_code == 200
+        assert history_response.json()["total"] == 0
+        assert history_response.json()["items"] == []
+
+    def test_clear_empty_scan_history(self, client):
+        response = client.delete("/api/v1/scans")
+
+        assert response.status_code == 200
+        assert response.json()["deleted_count"] == 0
 
 class TestSingleScanLookup:
     """Verify retrieval of single scan by UUID."""
