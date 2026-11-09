@@ -1,214 +1,313 @@
 # Phishing Attack Detector
 
-A browser-assisted phishing detection system combining a Chrome Extension (Manifest V3) frontend with a FastAPI backend, deterministic detection orchestration, and PostgreSQL persistence.
+A browser-assisted phishing detection system built with a Chrome
+Manifest V3 extension, a FastAPI backend, deterministic phishing
+heuristics, optional external analysis providers, and PostgreSQL
+persistence.
 
-> **Status:** Phase 1 Complete (Minimal Vertical Slice & React Extension Popup MVP).
-> **Detection Mode (Phase 1):** `MockDetectionOrchestrator` returning deterministic test fixtures matching the production response contract. Real heuristics, Google Safe Browsing reputation, and Gemini LLM analysis will be implemented in subsequent phases.
+> **Current status:** Core website scanning, deterministic detection,
+> scan history, optional provider adapters, and the manual high-risk
+> warning flow are implemented. Gmail extraction and automatic
+> navigation interception are not yet integrated into the production
+> extension.
 
----
-
-## 1. Architecture Overview
+## 1. Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Browser ["Chrome Extension (Manifest V3)"]
-        Popup["React Popup (Vite + TypeScript)"]
-        Tab["Active Tab (chrome.tabs.query)"]
-        Tab -->|Hostname & Title| Popup
+    subgraph Browser["Chrome Extension (Manifest V3)"]
+        Popup["React Popup"]
+        Warning["High-risk Warning Page"]
+        Gmail["Gmail integration (not yet wired)"]
+        Popup -->|"Manual high-risk warning action"| Warning
     end
 
-    subgraph Backend ["FastAPI Backend (/api/v1)"]
-        Router["API Router & Pydantic Validation"]
-        Orchestrator["Detection Orchestrator\n(Mock in Phase 1)"]
-        DomainCore["Offline PSL Domain Normalization\n(tldextract)"]
-        Repo["Scan Repository Layer"]
-
-        Popup -->|"POST /api/v1/scans/website\n(5s bounded timeout)"| Router
-        Router --> DomainCore
-        Router --> Orchestrator
-        Router --> Repo
+    subgraph Backend["FastAPI Backend"]
+        API["Versioned API (/api/v1)"]
+        Normalize["Offline Domain Normalization"]
+        Detection["Detection Orchestrator"]
+        Providers["Optional Provider Adapters"]
+        Repository["Scan Repository"]
+        API --> Normalize
+        API --> Detection
+        Detection --> Providers
+        API --> Repository
     end
 
-    subgraph Storage ["Database Layer"]
-        DB[(PostgreSQL 16 / SQLite Test)]
-        Repo -->|"Target Reference (Hostname only)"| DB
+    subgraph Storage["Database"]
+        DB[("PostgreSQL 16")]
+        Repository --> DB
     end
+
+    Popup -->|"Website scan"| API
+    Gmail -.-|"Integration pending"| API
 ```
 
-### Components
-- **Chrome Extension (`extension/`):** Manifest V3 popup built with Vite, React 18, and TypeScript. Styled with the Quiet Security design tokens. Communicates exclusively with localhost backend (`http://127.0.0.1:8000`).
-- **FastAPI Backend (`backend/app/`):** REST API providing versioned endpoints under `/api/v1`. Enforces strict Pydantic v2 schemas and standard error shapes (`VALIDATION_ERROR`, `NOT_FOUND`, `SERVICE_UNAVAILABLE`).
-- **Domain Normalization (`backend/app/core/domain.py`):** Offline-safe public suffix extraction via bundled Public Suffix List (PSL) snapshot with zero runtime network fetching.
-- **Data Privacy & Repository (`backend/app/db/`):** SQLAlchemy 2.0 models with UUID identifiers, JSONB evidence/tool statuses, and check constraints. Only normalized domains/hostnames are persisted in `target_reference`. Full URLs, query strings, auth tokens, page HTML, and email bodies are never stored.
+### Main components
 
----
+-   **Chrome extension (`extension/`):** Manifest V3 extension built
+    with React, TypeScript, and Vite. Includes the popup, backend status
+    indicator, scan results, scan history, and a high-risk warning page.
+-   **FastAPI backend (`backend/app/`):** Versioned API with Pydantic
+    validation, structured errors, detection orchestration, and
+    scan-history operations.
+-   **Detection engine:** Deterministic heuristics evaluate URL and
+    available content indicators. Risk scores are indicators, not
+    probabilities.
+-   **Optional providers:** Gemini analysis is opt-in. Google Safe
+    Browsing live requests remain disabled until explicitly configured
+    and approved.
+-   **Persistence:** SQLAlchemy models and Alembic migrations store scan
+    records using normalized host/domain references rather than full
+    submitted URLs.
 
-## 2. API Endpoints (`/api/v1`)
+## 2. API endpoints
 
-| Method | Endpoint | Description | Phase 1 Status |
-|---|---|---|---|
-| `GET` | `/api/v1/health` | Liveness probe returning `{"status": "ok"}` | Implemented |
-| `GET` | `/api/v1/health/ready` | Readiness probe checking database connectivity (`SELECT 1`) | Implemented |
-| `POST` | `/api/v1/scans/website` | Scan website URL; normalizes domain and returns verdict | Implemented |
-| `POST` | `/api/v1/scans/email` | Scan extracted email indicators (sender, subject, links) | Implemented |
-| `GET` | `/api/v1/scans` | Paginated scan history ordered newest first (`limit`, `offset`) | Implemented |
-| `GET` | `/api/v1/scans/{scan_id}` | Retrieve single stored scan result by UUID | Implemented |
+The following endpoints are implemented according to the current project
+audit.
 
----
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /api/v1/health | Backend liveness check |
+| GET | /api/v1/health/ready | Readiness check, including database connectivity |
+| POST | /api/v1/scans/website | Analyze a website URL |
+| POST | /api/v1/scans/email | Analyze supplied email indicators |
+| GET | /api/v1/scans | Retrieve paginated scan history |
+| GET | /api/v1/scans/{scan_id} | Retrieve one scan by ID |
+| DELETE | /api/v1/scans | Clear scan history |
+| GET | /health | Health-check alias for extension compatibility |
 
-## 3. Implemented vs. Planned Features
 
-### Implemented (Phase 1)
-- [x] Chrome Manifest V3 extension popup with Vite + React 18 + TypeScript.
-- [x] Quiet Security design system (default light editorial palette: canvas `#F7F5F0`, surface `#FFFFFF`, ink `#17212B`, muted `#5F6B75`, border `#D8DEE3`, teal `#0F766E`, amber `#9A5B00`, red `#B42318`, slate `#EDF1F4`).
-- [x] Active tab domain resolution and "Scan current site" user trigger.
-- [x] Five distinct popup states: Idle, Scanning, Successful Result, Analysis Unavailable, and Connection/Timeout Error.
-- [x] Expandable "Why this result?" progressive disclosure section with evidence details and per-tool status indicators.
-- [x] 5-second request timeout handling with informative failure message.
-- [x] Explicit non-probabilistic score labeling ("Risk score: X / 100 — not a probability of phishing").
-- [x] Strict safety principle: provider failures or unavailable analyses never render as clean or safe.
-- [x] FastAPI application with standardized 400/404/500 structured error handling.
-- [x] Pydantic v2 validation enforcing URL schemes (`http`, `https`), length bounds, and source enums.
-- [x] Offline Public Suffix List domain extraction preventing runtime network dependencies.
-- [x] SQLAlchemy 2.0 models and Alembic migration (`001_initial_scans.py`).
-- [x] Docker Compose configuration for PostgreSQL 16.
-- [x] Pre-commit / pre-push secret scanner (`scripts/check_secrets.py`) with test suite.
+## 3. Implemented capabilities and remaining work
 
-### Planned for Future Phases
-- [ ] **Phase 2:** Deterministic heuristic engine (IP hostname, punycode lookalikes, misleading subdomains, credential keywords) and server-side Gemini LLM adapter with structured JSON output.
-- [ ] **Phase 2:** Chrome navigation warning interstitial and Gmail DOM open-thread extraction spike.
-- [ ] **Phase 3:** Reputation provider adapter (Google Safe Browsing), deterministic evidence combiner, and 30-day retention scheduled job.
-- [ ] **Phase 4:** End-to-end wiring of live detection pipeline, Gmail inline panel, and history purge (`DELETE /api/v1/scans`).
-- [ ] **Phase 5:** Concurrency testing, failure-injection tests, dataset evaluation pipeline (PhishTank/Tranco), and precision/recall reporting.
-- [ ] **Phase 6:** Clean demo rehearsal, regression verification, and final presentation freeze.
+### Implemented
 
----
+-   [x] Chrome Manifest V3 popup built with React, TypeScript, and Vite.
+-   [x] Quiet Security visual design and distinct idle, scanning,
+    result, unavailable, and error states.
+-   [x] Website scanning API and deterministic URL/content heuristics.
+-   [x] Evidence combination and bounded 0--100 risk scoring.
+-   [x] Explicit `complete`, `partial`, and `unavailable` analysis
+    states; provider failures are not treated as safe results.
+-   [x] Optional server-side Gemini adapter with explicit opt-in and
+    structured-response validation.
+-   [x] Google Safe Browsing adapter, with live requests gated and
+    disabled by default pending explicit approval.
+-   [x] Scan-history retrieval, clearing, and 30-day retention cleanup.
+-   [x] Background retention scheduler integrated with FastAPI lifespan.
+-   [x] Manual high-risk warning page launched from a scan result.
+-   [x] PostgreSQL 16 Docker Compose configuration and Alembic migration
+    workflow.
+-   [x] Verification includes backend automated tests, extension type-checking and production-build checks, plus secret-scanning checks.
 
-## 4. Setup and Installation
+### Remaining work
+
+-   [ ] Integrate Gmail open-message extraction into the production
+    extension and add the inline result/warning UI. The existing
+    extraction spike is not yet wired into the live extension.
+-   [ ] Implement and verify automatic navigation interception. The
+    current warning page is a manual post-scan flow; it does not
+    intercept every navigation or block background requests.
+-   [ ] Build a reproducible public-dataset evaluation pipeline and
+    report measured precision, recall, F1, false-positive rate,
+    confusion matrix, and latency.
+-   [ ] Complete end-to-end regression testing and the final demo
+    walkthrough.
+
+## 4. Setup and installation
 
 ### Prerequisites
-- Python 3.11+
-- Node.js 18+ (verified on v24.14.1) & npm
-- Docker & Docker Compose (optional for local SQLite testing, required for live PostgreSQL)
 
-### Backend Setup
+-   Python 3.11 or later
+-   Node.js 18 or later and npm
+-   Docker and Docker Compose for PostgreSQL-backed development and
+    integration tests
 
-1. Create a Python virtual environment:
+### Backend setup
 
-   ```bash
-   python -m venv .venv
-   ```
+From the repository root:
 
-2. Activate the virtual environment:
+1.  Create a virtual environment:
 
-   **Windows PowerShell:**
-   ```powershell
-   .venv\Scripts\Activate.ps1
-   ```
+    ```bash
+    python -m venv .venv
+    ```
 
-   **Linux/macOS:**
-   ```bash
-   source .venv/bin/activate
-   ```
+2.  Activate it.
 
-3. Install dependencies:
+    **Windows PowerShell:**
 
-   ```bash
-   pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-   ```
+    ```powershell
+    .venv\Scripts\Activate.ps1
+    ```
 
-4. Configure environment:
+    **Linux/macOS:**
 
-   ```bash
-   cp .env.example .env
-   ```
+    ```bash
+    source .venv/bin/activate
+    ```
 
-   **Note:** The backend exposes health checks at both `/api/v1/health` (original) and `/health` (alias for Chrome extension compatibility). Both return `{"status":"ok"}`.
+3.  Install dependencies:
 
-5. Run the API server locally:
+    ```bash
+    pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+    ```
 
-   ```bash
-   uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
-   ```
+4.  Create your local environment file:
 
-   API interactive documentation will be available at `http://127.0.0.1:8000/docs`.
+    ```powershell
+    # Windows PowerShell
+    Copy-Item .env.example .env
+    ```
+
+    ```bash
+    # Linux/macOS
+    cp .env.example .env
+    ```
 
 
-### Extension Setup & Build
-1. Navigate to the `extension/` directory and install dependencies:
-   ```bash
-   cd extension
-   npm install
-   ```
-2. Build the extension bundle:
-   ```bash
-   npm run build
-   ```
-   Production assets will be emitted into `extension/dist/`.
-3. Load in Google Chrome:
-   - Open Chrome and navigate to `chrome://extensions/`.
-   - Enable **Developer mode** (toggle in top-right corner).
-   - Click **Load unpacked** and select `C:\Phishing Attack Detector\extension\dist`.
-   - The "Phishing Attack Detector" shield icon will appear in your Chrome toolbar.
+    Configure only the values needed for the features you intend to run.
+    Keep credentials in the backend environment; never place provider
+    keys in the extension.
 
----
+5.  Start the API:
 
-## 5. Verification & Testing
+    ```bash
+    uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+    ```
 
-### Backend Automated Tests
-Run the offline test suite (SQLite in-memory, zero external network calls):
-```bash
-python -m pytest backend/tests/ -v --tb=short --ignore=backend/tests/test_postgres_integration.py
-```
-**Result:** 40 passed in ~1.7s.
+    Interactive API documentation: `http://127.0.0.1:8000/docs`.
 
-Run secret scanner validation:
-```bash
-python scripts/check_secrets.py
-python -m pytest scripts/test_check_secrets.py -v
-```
-**Result:** 7 passed; repository clean of secrets and credential leaks.
+### PostgreSQL setup
 
-### Live PostgreSQL Integration Tests (Requires Docker)
-Start the PostgreSQL container:
+Start the database service:
+
 ```bash
 docker compose up -d db
 ```
-Run database migrations:
-```bash
+
+Apply migrations from the repository root:
+
+```powershell
 cd backend
 alembic upgrade head
 cd ..
 ```
-Run live database integration tests:
-```bash
-python -m pytest backend/tests/test_postgres_integration.py -v
-```
-**Result:** 2 passed against live PostgreSQL 16 container (`TestLivePostgresIntegration`).*(Tests automatically skip if the container is offline).*
 
-### Extension Verification
-Run type-checking and production build:
+### Extension setup
+
+From the repository root:
+
+```bash
+cd extension
+npm install
+npm run build
+```
+
+The production bundle is generated in `extension/dist/`.
+
+To load it in Chrome:
+
+1.  Open `chrome://extensions/`.
+2.  Enable **Developer mode**.
+3.  Select **Load unpacked**.
+4.  Choose the `extension/dist/` directory.
+
+## 5. Verification and tests
+
+Run the backend test suite:
+
+```bash
+python -m pytest backend/tests/ -v --tb=short
+```
+
+Run extension checks and build:
+
 ```bash
 cd extension
 npm run type-check
 npm run build
 ```
-**Result:** TypeScript compilation clean (`tsc --noEmit`), Vite production build clean (`dist/` generated).
 
----
+Run the secret scanner and its tests:
 
-## 6. Privacy & Security Safeguards
+```bash
+python scripts/check_secrets.py
+python -m pytest scripts/test_check_secrets.py -v
+```
 
-1. **Target Minimization:** The database only stores normalized domains/hostnames (e.g., `paypal-security-check.phish-alert.com`). Full URLs containing query strings, session tokens, or personal identifiers are stripped prior to persistence.
-2. **No Content Logging:** Full webpage HTML, visible text excerpts, and email message bodies are never persisted in PostgreSQL or written to application logs.
-3. **Strict CORS Policy:** Wildcard origins (`*` or `chrome-extension://*`) are forbidden. CORS is strictly restricted to explicit localhost origins and configured extension IDs.
-4. **Server-Side Credentials:** All third-party API keys (e.g., Gemini, Google Safe Browsing) are managed exclusively server-side via environment variables and never bundled into frontend extension code.
-5. **No Safe-by-Default on Failure:** If external providers or backend services timeout or return errors, the system outputs an explicit `unavailable` or `partial` state, never claiming the target is legitimate.
+PostgreSQL integration tests require the database container to be
+running. Test counts and outcomes can change as the project evolves; use
+the output from your current local test run rather than relying on
+historical counts in this README.
 
----
+To run PostgreSQL integration tests, start the database container first:
 
-## 7. Current Limitations
+```bash
+docker compose up -d db
+```
 
-- **Phase 1 Mock Detection:** The detection orchestrator currently returns deterministic fixture results (`MockDetectionOrchestrator`) based on keywords in submitted URLs (`phish`, `suspicious`, `unavailable`). Real heuristics and ML/LLM analysis are scheduled for Phase 2.
-- **Manual Chrome Testing Required:** End-to-end extension popup behavior in Chrome requires loading the unpacked `extension/dist` folder in `chrome://extensions/` and manually clicking the extension on active tabs.
-- **Docker Dependency for Postgres:** Local development testing uses in-memory SQLite by default; persistent PostgreSQL testing requires running Docker Compose.
+Then run:
+
+```bash
+python -m pytest backend/tests/test_postgres_integration.py -v
+```
+
+If the PostgreSQL host is unreachable, all tests in that file are
+automatically skipped with an explanatory message.
+
+## 6. Security & Privacy
+
+### CORS & security
+
+-   Wildcard origins (`*`) are prohibited.
+-   Only explicitly configured origins are allowed. When the Chrome
+    extension requires backend access, its exact origin
+    (`chrome-extension://<extension-id>`) must be added to
+    `ALLOWED_ORIGINS` in the backend configuration. The wildcard pattern
+    `chrome-extension://*` is prohibited.
+-   Credentials and API keys remain on the backend; they are never exposed
+    to the extension or client side.
+
+### Privacy guarantees
+
+-   **Data minimisation:** Scan history stores only normalized host/domain
+    references, not full submitted URLs.
+-   **No persistence of sensitive data:** Query strings, session tokens,
+    full page content, and email bodies are not persisted by default.
+-   **Logging hygiene:** Logs must not contain full content, credentials, or
+    sensitive URL parameters.
+
+### Gemini integration
+
+-   Gemini analysis is optional and requires explicit per-scan user opt‑in through the `opt_in_gemini` request field.
+-   When opt‑in is disabled, no Gemini requests are made.
+-   Gemini credentials are stored only in the backend environment and are
+    never bundled with the extension.
+-   Provider errors, timeouts, or unavailability result in a `partial`
+    or `unavailable` analysis state; they must never cause a safe
+    classification.
+
+### Google Safe Browsing integration
+
+-   The Safe Browsing adapter exists but live requests are disabled by
+    default.
+-   Enabling live Safe Browsing requests or configuring an API key requires
+    explicit project‑owner approval.
+-   If the provider is unavailable, the analysis must fall back to a
+    `partial` or `unavailable` state, not a safe verdict.
+
+## 7. Known limitations
+
+-   **Navigation protection:** The extension currently provides a manual
+    post-scan high-risk warning flow. Automatic pre-navigation
+    interception, omnibox interception, and comprehensive blocking of
+    background network requests are not implemented.
+-   **Gmail integration:** The backend email-scan endpoint exists, and
+    an extraction spike has been developed, but Gmail extraction and
+    inline results are not yet integrated into the production extension.
+-   **Evaluation:** Public-dataset evaluation and measured
+    model/detector performance metrics have not yet been completed.
+-   **Database mode:** SQLite is used in selected tests;
+    PostgreSQL-backed development and integration testing require Docker
+    Compose.

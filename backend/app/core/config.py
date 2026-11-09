@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     SAFE_BROWSING_API_KEY: str | None = None
 
     # Retention
-    SCAN_RETENTION_DAYS: int = 30
+    SCAN_RETENTION_DAYS: int = Field(default=30, gt=0)
+    RETENTION_CHECK_INTERVAL_SECONDS: int = Field(default=86400, gt=0)
+    RETENTION_INITIAL_DELAY_SECONDS: int = Field(default=5, ge=0)
 
 
 settings = Settings()

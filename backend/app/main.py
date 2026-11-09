@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 from backend.app.api.v1.router import api_v1_router
 from backend.app.api.v1.health import router as health_router
 from backend.app.core.config import settings
+from backend.app.services.retention import retention_scheduler_worker
 
 logger = logging.getLogger("phishing_detector")
 
@@ -22,8 +24,26 @@ logger = logging.getLogger("phishing_detector")
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application startup and shutdown events."""
     logger.info("Phishing Attack Detector API starting up...")
-    yield
-    logger.info("Phishing Attack Detector API shutting down...")
+
+    # Start retention cleanup scheduler background task
+    retention_stop_event = asyncio.Event()
+    retention_task = asyncio.create_task(
+        retention_scheduler_worker(stop_event=retention_stop_event),
+        name="retention-scheduler",
+    )
+
+    try:
+        yield
+    finally:
+        logger.info("Phishing Attack Detector API shutting down...")
+        # Signal stop and await worker task completion naturally
+        retention_stop_event.set()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("Error during retention task shutdown: %s", exc)
 
 
 app = FastAPI(
@@ -45,7 +65,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-   allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
