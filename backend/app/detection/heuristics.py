@@ -241,12 +241,16 @@ def detect_url_structure_anomalies(url: str) -> list[EvidenceItem]:
     evidence: list[EvidenceItem] = []
 
     # 1. Excessive URL length
+    # Severity: low.  URL length is a weak, easily mimicked structural signal that
+    # frequently fires on legitimate transactional, tracking, and unsubscribe URLs
+    # (e.g. OAuth tokens, UTM parameters, unsubscribe UUIDs).  It is preserved as a
+    # supporting indicator but must not independently drive a high risk score.
     if len(url) > 100:
         evidence.append(
             EvidenceItem(
                 type="url_excessive_length",
                 source="heuristics",
-                severity="medium",
+                severity="low",
                 explanation=(
                     f"The URL is {len(url)} characters long, which is unusually long. "
                     "Phishing URLs often pad legitimate-looking path segments or query strings "
@@ -304,9 +308,13 @@ def detect_url_structure_anomalies(url: str) -> list[EvidenceItem]:
                 )
             )
 
-    # 4. Deep subdomain nesting: calculate actual subdomain depth from domain parsing
+    # 4. Deep subdomain nesting: calculate actual subdomain depth from domain parsing.
     # Exclude public suffix and registered domain labels.
     # Threshold: >= 3 subdomain levels (e.g. 'a.b.c.example.com') indicates deep nesting.
+    # Severity: low.  Deeply nested subdomains are a weak indicator on their own because
+    # many legitimate services use service.region.env.corp.com-style hostnames.  This
+    # signal is preserved as a supporting indicator and gains weight when combined with
+    # independent high-confidence signals (misleading_subdomain, ip_hostname, punycode).
     try:
         info = extract_domain_info(url)
         if not info.is_ip and info.subdomain:
@@ -316,7 +324,7 @@ def detect_url_structure_anomalies(url: str) -> list[EvidenceItem]:
                     EvidenceItem(
                         type="deep_subdomain_nesting",
                         source="heuristics",
-                        severity="medium",
+                        severity="low",
                         explanation=(
                             f"The hostname has {len(subdomain_labels)} subdomain levels "
                             f"(subdomain: {info.subdomain!r}). Deep subdomain nesting is uncommon on "
@@ -360,9 +368,8 @@ def detect_urgency_and_credential_language(text: str | None) -> list[EvidenceIte
                     source="heuristics",
                     severity="medium",
                     explanation=(
-                        f"The page text contains urgency language: "
-                        f"'{match.group(0).strip()}'. Phishing pages use artificial time "
-                        "pressure and threat language to override users' security judgment."
+                        "The text contains urgency or coercive language typical of "
+                        "social-engineering tactics designed to pressure immediate action."
                     ),
                 )
             )
@@ -378,10 +385,9 @@ def detect_urgency_and_credential_language(text: str | None) -> list[EvidenceIte
                     source="heuristics",
                     severity="medium",
                     explanation=(
-                        f"The page text explicitly solicits sensitive credentials: "
-                        f"'{match.group(0).strip()}'. Legitimate services rarely ask for "
-                        "passwords, PINs, SSNs, or card numbers via page text outside of "
-                        "authenticated and encrypted forms."
+                        "The text explicitly solicits sensitive credentials (such as "
+                        "passwords, payment details, or personal identity information) "
+                        "outside of a standard secure workflow."
                     ),
                 )
             )
@@ -478,13 +484,14 @@ class DeterministicHeuristicsEngine:
         """
         evidence: list[EvidenceItem] = []
 
-        # Analyse each link for URL-structure anomalies and misleading subdomains
+        # Collect raw link-level evidence across all provided links
+        raw_link_evidence: list[EvidenceItem] = []
         for link in (links or []):
             if not link:
                 continue
             ip_evidence = detect_ip_hostname(link)
             if ip_evidence:
-                evidence.append(ip_evidence)
+                raw_link_evidence.append(ip_evidence)
 
             try:
                 parsed = urllib.parse.urlsplit(link)
@@ -492,12 +499,109 @@ class DeterministicHeuristicsEngine:
                 if hostname:
                     punycode_evidence = detect_punycode_and_lookalike(hostname)
                     if punycode_evidence:
-                        evidence.append(punycode_evidence)
+                        raw_link_evidence.append(punycode_evidence)
             except Exception:  # noqa: BLE001
                 pass
 
-            evidence.extend(detect_misleading_subdomains(link))
-            evidence.extend(detect_url_structure_anomalies(link))
+            raw_link_evidence.extend(detect_misleading_subdomains(link))
+            raw_link_evidence.extend(detect_url_structure_anomalies(link))
+
+        # Consolidate repeating link-level findings so multiple links triggering the
+        # same heuristic rule code do not generate redundant evidence items.
+        # Preserve useful context (such as number of affected URLs) without storing
+        # raw URLs or sensitive query parameters.
+        length_items = [i for i in raw_link_evidence if i.type == "url_excessive_length"]
+        nesting_items = [i for i in raw_link_evidence if i.type == "deep_subdomain_nesting"]
+        hyphen_items = [i for i in raw_link_evidence if i.type == "excessive_hyphens"]
+        at_items = [i for i in raw_link_evidence if i.type == "at_symbol_redirect"]
+
+        # 1. Excessive URL length
+        if len(length_items) == 1:
+            evidence.append(length_items[0])
+        elif len(length_items) > 1:
+            long_lengths = [len(l) for l in (links or []) if l and len(l) > 100]
+            max_len = max(long_lengths) if long_lengths else 100
+            evidence.append(
+                EvidenceItem(
+                    type="url_excessive_length",
+                    source="heuristics",
+                    severity="low",
+                    explanation=(
+                        f"{len(length_items)} links in this email exceed 100 characters in length "
+                        f"(longest is {max_len} characters). "
+                        "Phishing URLs often pad legitimate-looking path segments or query strings "
+                        "to obscure the true destination and confuse users."
+                    ),
+                )
+            )
+
+        # 2. Deep subdomain nesting
+        if len(nesting_items) == 1:
+            evidence.append(nesting_items[0])
+        elif len(nesting_items) > 1:
+            evidence.append(
+                EvidenceItem(
+                    type="deep_subdomain_nesting",
+                    source="heuristics",
+                    severity="low",
+                    explanation=(
+                        f"{len(nesting_items)} links in this email contain deeply nested subdomains (3 or more levels). "
+                        "Attackers frequently use deeply nested subdomains to disguise malicious destinations "
+                        "as legitimate services."
+                    ),
+                )
+            )
+
+        # 3. Excessive hyphens
+        if len(hyphen_items) == 1:
+            evidence.append(hyphen_items[0])
+        elif len(hyphen_items) > 1:
+            evidence.append(
+                EvidenceItem(
+                    type="excessive_hyphens",
+                    source="heuristics",
+                    severity="low",
+                    explanation=(
+                        f"{len(hyphen_items)} links in this email contain 3 or more hyphens in their hostname. "
+                        "Attackers frequently insert multiple hyphens into domain names to mimic "
+                        "legitimate brand names or create confusing subdomains."
+                    ),
+                )
+            )
+
+        # 4. At-symbol redirect
+        if len(at_items) == 1:
+            evidence.append(at_items[0])
+        elif len(at_items) > 1:
+            evidence.append(
+                EvidenceItem(
+                    type="at_symbol_redirect",
+                    source="heuristics",
+                    severity="high",
+                    explanation=(
+                        f"{len(at_items)} links in this email contain an '@' symbol in their authority component. "
+                        "Browsers interpret the part after '@' as the real host, allowing attackers to place "
+                        "a trusted domain name before '@' to deceive users."
+                    ),
+                )
+            )
+
+        # 5. Other link evidence items (ip_hostname, punycode_lookalike, misleading_subdomain)
+        # Deduplicate identical findings
+        handled_structural_types = {
+            "url_excessive_length",
+            "deep_subdomain_nesting",
+            "excessive_hyphens",
+            "at_symbol_redirect",
+        }
+        seen_keys: set[tuple[str, str]] = set()
+        for item in raw_link_evidence:
+            if item.type in handled_structural_types:
+                continue
+            key = (item.type, item.explanation)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                evidence.append(item)
 
         # Combine subject and body for text-level analysis
         text_parts: list[str] = []

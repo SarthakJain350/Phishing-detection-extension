@@ -1,4 +1,9 @@
-import type { ScanListResponse, ScanResponse, WebsiteScanRequest } from "./types.ts";
+import type {
+  EmailScanRequest,
+  ScanListResponse,
+  ScanResponse,
+  WebsiteScanRequest,
+} from "./types.ts";
 import { API_BASE_URL } from "./types.ts";
 
 export const REQUEST_TIMEOUT_MS = 5_000;
@@ -57,6 +62,111 @@ export async function scanWebsite(
   }
 
   return response.json() as Promise<ScanResponse>;
+}
+
+/**
+ * POST /api/v1/scans/email
+ * Submits extracted email indicators for phishing analysis.
+ * Throws a descriptive Error on network failure, timeout (30s), or non-2xx response.
+ * Never interprets a failure as a safe or legitimate result.
+ */
+export async function scanEmail(
+  request: EmailScanRequest
+): Promise<ScanResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/v1/scans/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(SCAN_REQUEST_TIMEOUT_MS),
+    });
+  } catch (err: unknown) {
+    if (
+      err instanceof DOMException &&
+      (err.name === "TimeoutError" || err.name === "AbortError")
+    ) {
+      throw new Error(
+        "The request timed out after 30 seconds. The backend may be unavailable or slow to respond."
+      );
+    }
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Could not connect to the backend. Make sure the API server is running on http://127.0.0.1:8000."
+      );
+    }
+    throw new Error(
+      "An unexpected error occurred while connecting to the backend."
+    );
+  }
+
+  if (!response.ok) {
+    let errorMessage = `Backend returned HTTP ${response.status}.`;
+    try {
+      const body = (await response.json()) as {
+        error?: { code?: string; message?: string };
+        detail?: string;
+      };
+      if (body?.error?.message) {
+        errorMessage = body.error.message;
+      } else if (body?.detail) {
+        errorMessage = body.detail;
+      }
+    } catch {
+      errorMessage = `Backend error: ${response.status} ${response.statusText}`;
+    }
+    throw new Error(errorMessage);
+  }
+
+  return response.json() as Promise<ScanResponse>;
+}
+
+export interface GmailScanResponseResult {
+  status: "ok" | "error";
+  code?: string;
+  detail?: string;
+  data?: ScanResponse;
+}
+
+/**
+ * Sends a SCAN_GMAIL message to the background service worker to trigger
+ * extraction and backend email analysis.
+ */
+export async function requestGmailScan(
+  optInGemini: boolean = false
+): Promise<GmailScanResponseResult> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(
+        { type: "SCAN_GMAIL", optInGemini },
+        (response: GmailScanResponseResult | undefined) => {
+          if (chrome.runtime.lastError) {
+            resolve({
+              status: "error",
+              code: "content_script_unavailable",
+              detail: chrome.runtime.lastError.message,
+            });
+            return;
+          }
+          if (!response) {
+            resolve({
+              status: "error",
+              code: "extraction_failed",
+              detail: "No response received from background service worker.",
+            });
+            return;
+          }
+          resolve(response);
+        }
+      );
+    } catch (err: unknown) {
+      resolve({
+        status: "error",
+        code: "content_script_unavailable",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 }
 
 /**

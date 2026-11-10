@@ -333,7 +333,7 @@ class TestDetectUrlStructureAnomalies:
         items = detect_url_structure_anomalies(long_url)
         assert any(i.type == "url_excessive_length" for i in items)
         item = next(i for i in items if i.type == "url_excessive_length")
-        assert_evidence_item(item, expected_type="url_excessive_length", expected_severity="medium")
+        assert_evidence_item(item, expected_type="url_excessive_length", expected_severity="low")
 
     def test_url_exactly_100_chars_not_flagged(self):
         # Exactly 100 characters: 'https://example.com/' (20) + 80 'a's
@@ -414,7 +414,7 @@ class TestDetectUrlStructureAnomalies:
         items = detect_url_structure_anomalies(url)
         assert any(i.type == "deep_subdomain_nesting" for i in items)
         item = next(i for i in items if i.type == "deep_subdomain_nesting")
-        assert_evidence_item(item, expected_type="deep_subdomain_nesting", expected_severity="medium")
+        assert_evidence_item(item, expected_type="deep_subdomain_nesting", expected_severity="low")
 
     def test_three_labels_not_flagged(self):
         # www.paypal.com → 1 subdomain level, no flag
@@ -772,6 +772,319 @@ class TestDeterministicHeuristicsEngineEmail:
 
 
 # ===========================================================================
+# 8. Scoring correctness and false-positive regression tests
+# ===========================================================================
+
+class TestScoringAndFalsePositiveRegression:
+    """
+    Regression tests verifying that:
+    - Correlated structural URL signals from ONE URL do not inflate the score
+      disproportionately.
+    - url_excessive_length alone produces only a low-severity indicator.
+    - deep_subdomain_nesting alone produces only a low-severity indicator.
+    - Legitimate transactional, unsubscribe, and account-setup URLs with long
+      query strings are detected but do not escalate beyond the low-severity
+      support-signal level.
+    - Independent high-confidence phishing signals (misleading_subdomain,
+      ip_hostname, punycode_homoglyph, at_symbol_redirect) remain strong
+      and are unaffected by the structural-signal severity adjustment.
+    """
+
+    def setup_method(self) -> None:
+        self.engine = DeterministicHeuristicsEngine()
+
+    # -----------------------------------------------------------------------
+    # Severity checks — confirm expected severity levels
+    # -----------------------------------------------------------------------
+
+    def test_url_excessive_length_severity_is_low(self):
+        """url_excessive_length must carry 'low' severity (not medium) to avoid
+        disproportionate score contribution when combined with other structural signals."""
+        long_url = "https://accounts.example.com/setup?" + "x=" * 50 + "token=abc123"
+        items = detect_url_structure_anomalies(long_url)
+        length_items = [i for i in items if i.type == "url_excessive_length"]
+        assert length_items, "Expected url_excessive_length to fire on a long URL"
+        for item in length_items:
+            assert item.severity == "low", (
+                f"url_excessive_length severity must be 'low', got '{item.severity}'. "
+                "URL length is a weak structural signal that fires on legitimate "
+                "transactional, tracking, and account-setup URLs."
+            )
+
+    def test_deep_subdomain_nesting_severity_is_low(self):
+        """deep_subdomain_nesting must carry 'low' severity (not medium) because many
+        legitimate services use multi-level subdomain hierarchies."""
+        url = "https://login.secure.bank.example.com/auth"
+        items = detect_url_structure_anomalies(url)
+        nesting_items = [i for i in items if i.type == "deep_subdomain_nesting"]
+        assert nesting_items, "Expected deep_subdomain_nesting to fire"
+        for item in nesting_items:
+            assert item.severity == "low", (
+                f"deep_subdomain_nesting severity must be 'low', got '{item.severity}'."
+            )
+
+    # -----------------------------------------------------------------------
+    # Score inflation regression — correlated structural signals
+    # -----------------------------------------------------------------------
+
+    def test_three_correlated_structural_signals_from_one_url_score_at_most_35(self):
+        """When url_excessive_length + deep_subdomain_nesting + excessive_hyphens all
+        fire from the same URL, the combined heuristic score must not exceed 35.
+        (All three are 'low' severity: strongest=25 + 2 extra items * 5 = 35.)
+        This prevents a 284-character legitimate Google transactional link from
+        producing a disproportionately high risk score of 60."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        # Construct exactly three low-severity structural items (all from one URL)
+        structural_evidence = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation="Long URL structural signal.",
+            ),
+            EvidenceItem(
+                type="deep_subdomain_nesting",
+                source="heuristics",
+                severity="low",
+                explanation="Deep nesting structural signal.",
+            ),
+            EvidenceItem(
+                type="excessive_hyphens",
+                source="heuristics",
+                severity="low",
+                explanation="Excessive hyphens structural signal.",
+            ),
+        ]
+        result = orch._combine(
+            evidence=structural_evidence,
+            llm_result=None,
+            llm_status=ToolStatusDetail(status="unavailable", reason_code="opt_in_required"),
+        )
+        assert result.risk_score is not None
+        assert result.risk_score <= 35, (
+            f"Three correlated structural low-severity signals must score at most 35, "
+            f"got {result.risk_score}. This prevents legitimate long URLs from being "
+            "incorrectly flagged with high risk scores."
+        )
+
+    def test_url_length_alone_scores_at_most_25(self):
+        """A single url_excessive_length finding must score at most 25 (low base, 0 bonus).
+        A long URL alone must not drive a risk score that triggers suspicious classification
+        without supporting evidence."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        evidence = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation="Long URL.",
+            )
+        ]
+        result = orch._combine(
+            evidence=evidence,
+            llm_result=None,
+            llm_status=ToolStatusDetail(status="unavailable", reason_code="opt_in_required"),
+        )
+        assert result.risk_score is not None
+        assert result.risk_score <= 25, (
+            f"URL length alone must score at most 25, got {result.risk_score}."
+        )
+
+    # -----------------------------------------------------------------------
+    # Legitimate URL false-positive regression
+    # -----------------------------------------------------------------------
+
+    def test_legitimate_account_setup_url_does_not_produce_excessive_score(self):
+        """A realistic 284-character Google account-setup URL with a long token and
+        parameters must produce evidence (url_excessive_length) but NOT score above 35."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        # Realistic-looking account-setup / verification URL with a long token
+        url = (
+            "https://accounts.google.com/o/oauth2/auth?client_id=1234567890"
+            "&redirect_uri=https%3A%2F%2Fmail.google.com%2Foauth2%2Fcallback"
+            "&response_type=code&scope=openid+email+profile"
+            "&state=CSRF_TOKEN_PLACEHOLDER_xyzxyzxyz"
+            "&nonce=NONCE_VALUE_abcdefghijklmnopqrstuvwxyz"
+            "&prompt=select_account"
+        )
+        assert len(url) > 100, f"Test URL is too short ({len(url)} chars), adjust it"
+
+        orch = RealDetectionOrchestrator()
+        # Only run heuristics directly
+        evidence = self.engine.analyze_email(
+            sender="no-reply@google.com",
+            subject="Set up your Google account",
+            body_text="Click the link to complete account setup.",
+            links=[url],
+        )
+
+        # url_excessive_length should fire
+        length_ev = [e for e in evidence if e.type == "url_excessive_length"]
+        assert length_ev, "Expected url_excessive_length for a >100 char URL"
+
+        # Score should not be excessive
+        llm_status = ToolStatusDetail(status="unavailable", reason_code="opt_in_required")
+        result = orch._combine(evidence=evidence, llm_result=None, llm_status=llm_status)
+        assert result.risk_score is not None
+        assert result.risk_score <= 35, (
+            f"Legitimate account-setup URL scored {result.risk_score} — "
+            "must not exceed 35 for a correlated structural-signal group."
+        )
+
+    def test_legitimate_unsubscribe_url_does_not_produce_excessive_score(self):
+        """A realistic long unsubscribe URL (common in bulk email) with a UUID token
+        must not produce a disproportionate risk score."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        url = (
+            "https://email.company.com/unsubscribe"
+            "?token=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            "&list=newsletter"
+            "&user=encoded_user_id_placeholder_12345"
+            "&sig=HMAC_SIGNATURE_VALUE_PLACEHOLDER_abcdef"
+        )
+        assert len(url) > 100
+
+        orch = RealDetectionOrchestrator()
+        evidence = self.engine.analyze_email(
+            sender="newsletter@company.com",
+            subject="Your weekly digest",
+            body_text="Unsubscribe from this list.",
+            links=[url],
+        )
+        llm_status = ToolStatusDetail(status="unavailable", reason_code="opt_in_required")
+        result = orch._combine(evidence=evidence, llm_result=None, llm_status=llm_status)
+        # Might score 0 (no evidence) or low if only url_excessive_length fires
+        if result.risk_score is not None:
+            assert result.risk_score <= 35, (
+                f"Legitimate unsubscribe URL scored {result.risk_score} — must not exceed 35."
+            )
+
+    def test_legitimate_tracking_url_does_not_produce_excessive_score(self):
+        """A realistic long UTM-tracked marketing URL must not score excessively."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        url = (
+            "https://www.example.com/products/summer-sale-2024"
+            "?utm_source=email&utm_medium=newsletter"
+            "&utm_campaign=summer_sale_announcement"
+            "&utm_content=cta_button_hero"
+            "&utm_term=summer+sale+deals+2024"
+            "&ref=email_promo_aug2024"
+        )
+        assert len(url) > 100
+
+        orch = RealDetectionOrchestrator()
+        evidence = self.engine.analyze_email(
+            sender="promotions@example.com",
+            subject="Summer sale is on!",
+            body_text="Shop the summer sale now.",
+            links=[url],
+        )
+        llm_status = ToolStatusDetail(status="unavailable", reason_code="opt_in_required")
+        result = orch._combine(evidence=evidence, llm_result=None, llm_status=llm_status)
+        if result.risk_score is not None:
+            assert result.risk_score <= 35, (
+                f"Legitimate tracking URL scored {result.risk_score} — must not exceed 35."
+            )
+
+    # -----------------------------------------------------------------------
+    # High-confidence signals remain unaffected
+    # -----------------------------------------------------------------------
+
+    def test_misleading_subdomain_still_produces_high_severity_evidence(self):
+        """misleading_subdomain must remain 'high' severity and drive phishing-level scores."""
+        items = detect_misleading_subdomains("https://paypal.com.account-verify.phish.net/login")
+        assert items, "Expected misleading_subdomain evidence"
+        for item in items:
+            assert item.severity == "high", (
+                f"misleading_subdomain severity must remain 'high', got '{item.severity}'"
+            )
+
+    def test_ip_hostname_still_produces_high_severity_evidence(self):
+        """ip_hostname must remain 'high' severity."""
+        item = detect_ip_hostname("http://192.168.1.100/phish")
+        assert item is not None
+        assert item.severity == "high"
+
+    def test_punycode_still_produces_high_severity_evidence(self):
+        """punycode_homoglyph must remain 'high' severity."""
+        item = detect_punycode_and_lookalike("xn--pypal-4ve.com")
+        assert item is not None
+        assert item.severity == "high"
+
+    def test_at_symbol_redirect_still_produces_high_severity_evidence(self):
+        """at_symbol_redirect must remain 'high' severity."""
+        items = detect_url_structure_anomalies("https://trusted.com@evil-redirect.net/phish")
+        at_items = [i for i in items if i.type == "at_symbol_redirect"]
+        assert at_items, "Expected at_symbol_redirect"
+        assert at_items[0].severity == "high"
+
+    def test_phishing_composite_misleading_subdomain_still_reaches_phishing_threshold(self):
+        """A URL with misleading_subdomain (high) + url_excessive_length (low) +
+        deep_subdomain_nesting (low) must still score >= 70 → phishing."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem, ToolStatusDetail
+
+        orch = RealDetectionOrchestrator()
+        evidence = [
+            EvidenceItem(
+                type="misleading_subdomain",
+                source="heuristics",
+                severity="high",
+                explanation="Subdomain impersonates PayPal.",
+            ),
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation="Long URL.",
+            ),
+            EvidenceItem(
+                type="deep_subdomain_nesting",
+                source="heuristics",
+                severity="low",
+                explanation="Deep nesting.",
+            ),
+        ]
+        result = orch._combine(
+            evidence=evidence,
+            llm_result=None,
+            llm_status=ToolStatusDetail(status="unavailable", reason_code="opt_in_required"),
+        )
+        assert result.risk_score is not None
+        assert result.risk_score >= 70, (
+            f"misleading_subdomain + structural signals must reach >= 70, "
+            f"got {result.risk_score}. High-confidence signals must not be weakened."
+        )
+        assert result.classification == "phishing"
+
+    def test_suspicious_nested_subdomains_still_detectable(self):
+        """Deep subdomain nesting on a phishing-style domain is still flagged."""
+        url = "https://login.secure.verify.paypal-update.xyz/account"
+        items = detect_url_structure_anomalies(url)
+        nesting = [i for i in items if i.type == "deep_subdomain_nesting"]
+        assert nesting, "Deep subdomain nesting on phishing URL must still be detected"
+
+    def test_punycode_and_lookalike_detection_unaffected(self):
+        """Punycode detection must be completely unaffected by severity changes."""
+        result = detect_punycode_and_lookalike("xn--googl-kua.com")
+        assert result is not None
+        assert result.type == "punycode_homoglyph"
+        assert result.severity == "high"
+
+
+# ===========================================================================
 # 7. EvidenceItem field stability
 # ===========================================================================
 
@@ -831,3 +1144,186 @@ class TestEvidenceItemFieldStability:
     def test_credential_type_id(self):
         items = detect_urgency_and_credential_language("Please verify your password.")
         assert any(i.type == "credential_harvesting_language" for i in items)
+
+    def test_urgency_and_credential_explanations_do_not_interpolate_raw_matches(self):
+        """Privacy test: explanations must be generic and never contain exact matched strings."""
+        urgent_phrase = "your account has been disabled"
+        cred_phrase = "enter your social security number"
+        body_text = f"Warning: {urgent_phrase} immediately! Please {cred_phrase} now."
+
+        items = detect_urgency_and_credential_language(body_text)
+        assert len(items) == 2
+        for item in items:
+            assert urgent_phrase not in item.explanation
+            assert cred_phrase not in item.explanation
+            assert "social security" not in item.explanation
+            assert "disabled" not in item.explanation
+            assert item.explanation in (
+                "The text contains urgency or coercive language typical of social-engineering tactics designed to pressure immediate action.",
+                "The text explicitly solicits sensitive credentials (such as passwords, payment details, or personal identity information) outside of a standard secure workflow.",
+            )
+
+    # -----------------------------------------------------------------------
+    # Deduplication and Risk Inflation Tests
+    # -----------------------------------------------------------------------
+
+    def test_multiple_long_urls_consolidate_into_single_evidence_item(self):
+        """Multiple long URLs in an email must produce a single consolidated
+        url_excessive_length EvidenceItem that notes the count of affected links
+        and longest length, without storing raw URLs or query parameters."""
+        engine = DeterministicHeuristicsEngine()
+        long_urls = [
+            f"https://www.meetup.com/events/nyc-tech/rsvp?token=SECRET_TOKEN_{i}_xyz1234567890&user=usr_abc{i}&tracking=utm_email_meetup_campaign_2026_notification_reminder"
+            for i in range(5)
+        ]
+        for u in long_urls:
+            assert len(u) > 100
+
+        evidence = engine.analyze_email(
+            sender="reminders@meetup.com",
+            subject="Upcoming meetup reminder",
+            body_text="Here are details for your upcoming meetups.",
+            links=long_urls,
+        )
+
+        length_items = [e for e in evidence if e.type == "url_excessive_length"]
+        assert len(length_items) == 1, (
+            f"Expected exactly 1 consolidated url_excessive_length item, got {len(length_items)}"
+        )
+        item = length_items[0]
+        assert item.severity == "low"
+        assert "5 links in this email exceed 100 characters in length" in item.explanation
+        assert "longest is" in item.explanation
+
+        # Privacy check: Ensure no token, username, or raw URL is in the explanation
+        for i in range(5):
+            assert f"SECRET_TOKEN_{i}" not in item.explanation
+            assert f"usr_abc{i}" not in item.explanation
+        assert "https://" not in item.explanation
+
+    def test_single_long_url_in_email_preserves_standalone_explanation(self):
+        """A single long URL in an email preserves the standalone explanation format."""
+        engine = DeterministicHeuristicsEngine()
+        single_long_url = "https://www.example.com/very/long/path/with/lots/of/padding/segments/to/obscure/the/real/target/destination/here?token=12345"
+        assert len(single_long_url) > 100
+
+        evidence = engine.analyze_email(
+            sender="newsletter@example.com",
+            subject="Digest",
+            body_text="Read more.",
+            links=[single_long_url],
+        )
+
+        length_items = [e for e in evidence if e.type == "url_excessive_length"]
+        assert len(length_items) == 1
+        assert "The URL is" in length_items[0].explanation
+        assert str(len(single_long_url)) in length_items[0].explanation
+
+    def test_ten_urls_same_heuristic_do_not_produce_higher_score_than_one(self):
+        """Ten URLs triggering the same heuristic (url_excessive_length) must produce
+        the exact same risk score (25) as a single URL triggering that heuristic.
+        Repeated instances of the same heuristic rule code must not inflate the score to 45."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem
+
+        orch = RealDetectionOrchestrator()
+
+        single_item = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation="1 link exceeds 100 characters in length.",
+            )
+        ]
+        score_single = orch._heuristic_score(single_item)
+        assert score_single == 25
+
+        ten_items = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation=f"Link {i} exceeds 100 characters in length.",
+            )
+            for i in range(10)
+        ]
+        score_ten = orch._heuristic_score(ten_items)
+        assert score_ten == 25, (
+            f"10 URLs with url_excessive_length must score 25 (same as 1), got {score_ten}"
+        )
+
+    def test_independent_heuristic_categories_still_contribute_independently(self):
+        """When multiple distinct heuristic rule codes are present, each independent
+        category beyond the first contributes 5 bonus points, even if one category
+        has multiple instances."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem
+
+        orch = RealDetectionOrchestrator()
+
+        # 10 long URLs + 1 deep nesting URL -> 2 distinct categories (both low severity)
+        # Base: 25, bonus: 1 * 5 = 5 -> total 30
+        mixed_items = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation=f"Long URL {i}",
+            )
+            for i in range(10)
+        ] + [
+            EvidenceItem(
+                type="deep_subdomain_nesting",
+                source="heuristics",
+                severity="low",
+                explanation="Deep subdomain nesting",
+            )
+        ]
+
+        score = orch._heuristic_score(mixed_items)
+        assert score == 30, f"Expected score 30 for 2 distinct categories, got {score}"
+
+        # Add 3rd distinct category: excessive_hyphens -> total 35
+        mixed_items.append(
+            EvidenceItem(
+                type="excessive_hyphens",
+                source="heuristics",
+                severity="low",
+                explanation="Excessive hyphens",
+            )
+        )
+        score_three = orch._heuristic_score(mixed_items)
+        assert score_three == 35, f"Expected score 35 for 3 distinct categories, got {score_three}"
+
+    def test_high_confidence_phishing_indicator_retains_severity_and_scoring(self):
+        """High-confidence phishing indicators (e.g. misleading_subdomain, severity='high')
+        retain their full scoring weight (75 base) and reach phishing threshold (>= 70)
+        even when multiple long URLs are also present."""
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import EvidenceItem
+
+        orch = RealDetectionOrchestrator()
+
+        items = [
+            EvidenceItem(
+                type="url_excessive_length",
+                source="heuristics",
+                severity="low",
+                explanation=f"Long URL {i}",
+            )
+            for i in range(5)
+        ] + [
+            EvidenceItem(
+                type="misleading_subdomain",
+                source="heuristics",
+                severity="high",
+                explanation="Subdomain impersonates PayPal on an unrelated domain.",
+            )
+        ]
+
+        score = orch._heuristic_score(items)
+        # High base = 75, plus 1 additional category (url_excessive_length) * 5 = 80
+        assert score == 80
+        classification = orch._classification_for_score(score, has_evidence=True)
+        assert classification == "phishing"

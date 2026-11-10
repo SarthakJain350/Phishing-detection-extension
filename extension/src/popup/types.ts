@@ -70,9 +70,19 @@ export interface WebsiteScanRequest {
   source: ScanSource;
 }
 
+/** Email scan request — matches EmailScanRequest Pydantic schema exactly */
+export interface EmailScanRequest {
+  sender?: string | null;
+  subject?: string | null;
+  body_text?: string | null;
+  links?: string[];
+  source?: "gmail";
+  opt_in_gemini?: boolean;
+}
+
 /** Internal popup UI states — never expose unavailable/error as safe */
 export type PopupUIState =
   | { kind: "idle" }
-  | { kind: "scanning" }
+  | { kind: "scanning"; message?: string }
   | { kind: "result"; data: ScanResponse; scannedUrl?: string }
   | { kind: "connection_error"; message: string };

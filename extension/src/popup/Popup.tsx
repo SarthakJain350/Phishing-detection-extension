@@ -13,6 +13,7 @@ import {
   listRecentScans,
   clearScanHistory,
   checkBackendHealth,
+  requestGmailScan,
 } from "./api";
 import {
   isHighRiskScan,
@@ -22,6 +23,8 @@ import {
 import {
   getToolStatusLabel,
   getPartialAnalysisSummary,
+  getClassificationDisplayMeta,
+  getAdditionalFindings,
 } from "./statusFormatting";
 import {
   formatScanTime,
@@ -108,17 +111,24 @@ function ProductHeader() {
   );
 }
 
-function SiteRow({ domain }: { domain: string }) {
+function SiteRow({
+  domain,
+  targetType,
+}: {
+  domain: string;
+  targetType?: "website" | "email";
+}) {
+  const label = targetType === "email" ? "Email target" : "Current site";
   return (
     <div className="site-row">
       <span className="site-row__label" aria-hidden="true">
-        Current site
+        {label}
       </span>
       <div className="site-row__domain-container">
         <span
           className="site-row__domain tabular-nums"
           title={domain}
-          aria-label={`Current website domain: ${domain}`}
+          aria-label={`${label}: ${domain}`}
         >
           {domain}
         </span>
@@ -130,56 +140,41 @@ function SiteRow({ domain }: { domain: string }) {
 function ClassificationBadge({
   classification,
   analysisStatus,
+  targetType,
 }: {
   classification: Classification;
   analysisStatus: AnalysisStatus;
+  targetType?: "website" | "email";
 }) {
-  if (analysisStatus === "unavailable") {
-    return (
-      <div className="classification-badge classification-badge--unavailable">
-        <UnavailableIcon style={{ color: "var(--color-muted)" }} />
-        <span>Analysis unavailable</span>
-      </div>
-    );
+  const meta = getClassificationDisplayMeta(
+    classification,
+    analysisStatus,
+    targetType
+  );
+
+  let icon: JSX.Element;
+  switch (meta.visualKey) {
+    case "phishing":
+      icon = <DangerIcon style={{ color: "var(--color-red)" }} />;
+      break;
+    case "suspicious":
+    case "partial":
+      icon = <CautionIcon style={{ color: "var(--color-amber)" }} />;
+      break;
+    case "likely_legitimate":
+      icon = <CheckIcon style={{ color: "var(--color-teal)" }} />;
+      break;
+    case "unavailable":
+    case "inconclusive":
+    default:
+      icon = <UnavailableIcon style={{ color: "var(--color-muted)" }} />;
+      break;
   }
-
-  if (analysisStatus === "partial" && classification === null) {
-    return (
-      <div className="classification-badge classification-badge--partial">
-        <CautionIcon style={{ color: "var(--color-amber)" }} />
-        <span>Partial analysis</span>
-      </div>
-    );
-  }
-
-  const configs: Record<
-    string,
-    { icon: JSX.Element; label: string; cls: string }
-  > = {
-    phishing: {
-      icon: <DangerIcon style={{ color: "var(--color-red)" }} />,
-      label: "Phishing risk detected",
-      cls: "classification-badge--phishing",
-    },
-    suspicious: {
-      icon: <CautionIcon style={{ color: "var(--color-amber)" }} />,
-      label: "Suspicious website",
-      cls: "classification-badge--suspicious",
-    },
-    likely_legitimate: {
-      icon: <CheckIcon style={{ color: "var(--color-teal)" }} />,
-      label: "No strong phishing signals found",
-      cls: "classification-badge--likely_legitimate",
-    },
-  };
-
-  const key = classification ?? "likely_legitimate";
-  const cfg = configs[key] ?? configs["likely_legitimate"];
 
   return (
-    <div className={`classification-badge ${cfg.cls}`}>
-      {cfg.icon}
-      <span>{cfg.label}</span>
+    <div className={`classification-badge ${meta.cssClass}`}>
+      {icon}
+      <span>{meta.label}</span>
     </div>
   );
 }
@@ -219,11 +214,13 @@ function ResultSummary({
   analysisStatus,
   reasons,
   toolStatuses,
+  targetType,
 }: {
   classification: Classification;
   analysisStatus: AnalysisStatus;
   reasons: string[];
   toolStatuses?: ToolStatuses;
+  targetType?: "website" | "email";
 }) {
   if (analysisStatus === "unavailable") {
     return (
@@ -236,7 +233,7 @@ function ResultSummary({
   if (analysisStatus === "partial") {
     return (
       <p className="result-summary">
-        {getPartialAnalysisSummary(reasons, toolStatuses)}
+        {getPartialAnalysisSummary(reasons, toolStatuses, classification, targetType)}
       </p>
     );
   }
@@ -266,7 +263,7 @@ function ResultSummary({
 
 function EvidencePane({ data }: { data: ScanResponse }) {
   const hasEvidence = data.evidence.length > 0;
-  const extraReasons = data.reasons.slice(1);
+  const extraReasons = getAdditionalFindings(data.reasons, data.evidence);
 
   return (
     <div className="evidence-pane">
@@ -378,9 +375,10 @@ function ResultCard({
         ? "partial"
         : (data.classification ?? "likely_legitimate");
 
+  const extraReasons = getAdditionalFindings(data.reasons, data.evidence);
   const hasExpandable =
     data.evidence.length > 0 ||
-    data.reasons.length > 1 ||
+    extraReasons.length > 0 ||
     data.analysis_status !== "complete";
 
   return (
@@ -396,6 +394,7 @@ function ResultCard({
           <ClassificationBadge
             classification={data.classification}
             analysisStatus={data.analysis_status}
+            targetType={data.target_type}
           />
           <StatusChip status={data.analysis_status} />
         </div>
@@ -413,6 +412,7 @@ function ResultCard({
         analysisStatus={data.analysis_status}
         reasons={data.reasons}
         toolStatuses={data.tool_statuses}
+        targetType={data.target_type}
       />
 
       {hasExpandable && (
@@ -750,6 +750,9 @@ export function Popup() {
   const [pageTitle, setPageTitle] = useState<string>("");
   const [uiState, setUiState] = useState<PopupUIState>({ kind: "idle" });
   const [activeView, setActiveView] = useState<ActiveView>("scan");
+  const [optInGemini, setOptInGemini] = useState<boolean>(false);
+
+  const isGmail = Boolean(currentUrl) && currentUrl.startsWith("https://mail.google.com");
 
   useEffect(() => {
     getActiveTabInfo().then((info) => {
@@ -791,6 +794,55 @@ export function Popup() {
     }
   }, [currentUrl, pageTitle]);
 
+  const handleScanEmail = useCallback(async () => {
+    setUiState({ kind: "scanning", message: "Analyzing open email…" });
+    try {
+      const resp = await requestGmailScan(optInGemini);
+      if (resp.status === "ok" && resp.data) {
+        setUiState({
+          kind: "result",
+          data: resp.data,
+          scannedUrl: resp.data.target_reference,
+        });
+      } else {
+        const code = resp.code;
+        let message: string;
+        if (code === "no_active_gmail_tab") {
+          message =
+            "Active tab is not a Gmail page. Please navigate to an open Gmail email.";
+        } else if (code === "no_open_email") {
+          message =
+            "No open email found in this Gmail tab. Please open an email thread before scanning.";
+        } else if (code === "content_script_unavailable") {
+          message =
+            "Gmail content script is unavailable. Please reload the Gmail tab and try again.";
+        } else if (code === "timeout") {
+          message =
+            "Email extraction timed out after 5 seconds. The tab may be busy or reloading.";
+        } else if (code === "invalid_payload") {
+          message =
+            "Received invalid or malformed extraction data from the Gmail tab.";
+        } else if (code === "concurrent_scan") {
+          message =
+            "A scan is already in progress for this tab. Please wait for it to complete.";
+        } else if (code === "backend_unavailable") {
+          message =
+            resp.detail ||
+            "Could not connect to the backend. Make sure the API server is running on http://127.0.0.1:8000.";
+        } else {
+          message = resp.detail || "Email analysis could not be completed.";
+        }
+        setUiState({ kind: "connection_error", message });
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "An unknown error occurred while scanning email.";
+      setUiState({ kind: "connection_error", message });
+    }
+  }, [optInGemini]);
+
   const handleReset = useCallback(() => {
     setUiState({ kind: "idle" });
   }, []);
@@ -810,27 +862,103 @@ export function Popup() {
     <div className="popup-layout">
       <ProductHeader />
 
-      {activeView === "scan" && domain && domain !== "(not a web page)" && (
-        <SiteRow domain={domain} />
+      {activeView === "scan" && (
+        uiState.kind === "result" ? (
+          <SiteRow
+            domain={uiState.data.target_reference}
+            targetType={uiState.data.target_type}
+          />
+        ) : (
+          domain && domain !== "(not a web page)" && <SiteRow domain={domain} />
+        )
       )}
       {activeView === "scan" && (
         <main className="content">
           {uiState.kind === "idle" && (
-            <div className="empty-state">
-              <h1 className="empty-state__heading">Check this website</h1>
-              <p className="empty-state__body">
-                Scan the current page for signals commonly associated with
-                phishing.
-              </p>
-              <button
-                className="btn btn--primary"
-                onClick={handleScan}
-                disabled={!canScan}
-                aria-label="Scan current site for phishing signals"
-              >
-                Scan current site
-              </button>
-            </div>
+            isGmail ? (
+              <div className="empty-state">
+                <h1 className="empty-state__heading">Check this email</h1>
+                <p className="empty-state__body">
+                  Scan the currently open email thread for deceptive links,
+                  sender mismatches, and phishing indicators.
+                </p>
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "0.5rem",
+                    width: "100%",
+                  }}
+                >
+                  <button
+                    className="btn btn--primary"
+                    onClick={handleScanEmail}
+                    aria-label="Scan this email for phishing signals"
+                  >
+                    Scan this email
+                  </button>
+                  <button
+                    className="btn btn--secondary"
+                    onClick={handleScan}
+                    disabled={!canScan}
+                    aria-label="Scan current site (mail.google.com)"
+                  >
+                    Scan current site
+                  </button>
+                </div>
+                <div
+                  style={{
+                    marginTop: "0.875rem",
+                    padding: "0.5rem 0.75rem",
+                    background: "rgba(0, 0, 0, 0.03)",
+                    borderRadius: "4px",
+                    border: "1px solid var(--color-border, #e5e7eb)",
+                    textAlign: "left",
+                  }}
+                >
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "0.5rem",
+                      fontSize: "0.78125rem",
+                      color: "var(--color-muted, #4b5563)",
+                      cursor: "pointer",
+                      lineHeight: "1.4",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={optInGemini}
+                      onChange={(e) => setOptInGemini(e.target.checked)}
+                      style={{ marginTop: "0.15rem" }}
+                      aria-label="Opt-in to Gemini AI analysis for email"
+                    />
+                    <span>
+                      Include AI content analysis (transmits sender address,
+                      subject, email body, link count, and primary domain to
+                      Google Gemini). Disabled by default.
+                    </span>
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-state">
+                <h1 className="empty-state__heading">Check this website</h1>
+                <p className="empty-state__body">
+                  Scan the current page for signals commonly associated with
+                  phishing.
+                </p>
+                <button
+                  className="btn btn--primary"
+                  onClick={handleScan}
+                  disabled={!canScan}
+                  aria-label="Scan current site for phishing signals"
+                >
+                  Scan current site
+                </button>
+              </div>
+            )
           )}
 
           {uiState.kind === "scanning" && (
@@ -841,9 +969,13 @@ export function Popup() {
               aria-label="Scan in progress"
             >
               <div className="loading-indicator" aria-hidden="true" />
-              <p className="loading-state__heading">Checking this website…</p>
+              <p className="loading-state__heading">
+                {uiState.message ?? "Checking this website…"}
+              </p>
               <p className="loading-state__body">
-                Reviewing the page and available reputation signals.
+                {isGmail && uiState.message?.includes("email")
+                  ? "Extracting email indicators and running phishing checks."
+                  : "Reviewing the page and available reputation signals."}
               </p>
             </div>
           )}

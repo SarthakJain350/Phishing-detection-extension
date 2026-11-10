@@ -12,9 +12,16 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, "popup.html"),
         warning: resolve(__dirname, "warning.html"),
+        gmailExtract: resolve(__dirname, "src/content/gmailExtract.ts"),
+        background: resolve(__dirname, "src/background.ts"),
       },
       output: {
-        entryFileNames: "assets/[name].js",
+        entryFileNames: (chunkInfo) => {
+          if (chunkInfo.name === "gmailExtract") {
+            return "content/[name].js";
+          }
+          return "assets/[name].js";
+        },
         chunkFileNames: "assets/[name].js",
         assetFileNames: "assets/[name].[ext]",
       },

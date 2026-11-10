@@ -185,6 +185,7 @@ def scan_email(
         body_text=payload.body_text,
         links=payload.links,
         primary_domain=primary_domain,
+        opt_in_gemini=payload.opt_in_gemini,
     )
 
     # Persist record (never persists full message body or full link paths)

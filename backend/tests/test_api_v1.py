@@ -232,6 +232,20 @@ class TestEmailScanValidationAndPersistence:
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
+    def test_email_scan_gemini_opt_in_default_false(self, client):
+        """Verify that Gemini LLM analysis is skipped by default for email scans."""
+        payload = {
+            "sender": "alerts@example.com",
+            "subject": "Routine Notice",
+            "body_text": "Nothing suspicious here.",
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tool_statuses"]["llm"]["status"] == "unavailable"
+        assert data["tool_statuses"]["llm"]["reason_code"] == "opt_in_required"
+
 
 class TestScanHistoryAndPagination:
     """Verify listing recent scans with pagination and ordering."""
@@ -1214,3 +1228,741 @@ class TestReputationIntegration:
 
         assert result_with_failure.risk_score == result_without_reputation.risk_score
         assert result_with_failure.classification == result_without_reputation.classification
+
+    # -----------------------------------------------------------------------
+    # Privacy & Gemini email integration tests
+    # -----------------------------------------------------------------------
+
+    def test_email_scan_gemini_opt_in_explicit_false(self, client):
+        """Explicit opt_in_gemini=False must not call Gemini."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+
+        class ExplodingGemini:
+            def analyze_target(self, **kwargs):
+                raise AssertionError("Gemini must not be called when opt_in_gemini=False")
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=ExplodingGemini(),
+        )
+        try:
+            resp = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": "alerts@service.com",
+                    "subject": "Security notice",
+                    "body_text": "Please check your account.",
+                    "links": ["https://service.com/account"],
+                    "source": "gmail",
+                    "opt_in_gemini": False,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["tool_statuses"]["llm"]["status"] == "unavailable"
+            assert data["tool_statuses"]["llm"]["reason_code"] == "opt_in_required"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_gemini_opt_in_explicit_true_invokes_gemini(self, client):
+        """Explicit opt_in_gemini=True invokes Gemini and sanitizes persisted reasons."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class SpyGemini:
+            def __init__(self):
+                self.called = False
+
+            def analyze_target(self, **kwargs):
+                self.called = True
+                return (
+                    GeminiAnalysisResult(
+                        classification="phishing",
+                        risk_score=85,
+                        reasons=["Model saw raw user body: SensitiveSecret123 in email."],
+                        confidence_label="high",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        gemini_spy = SpyGemini()
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=gemini_spy,
+        )
+        try:
+            resp = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": "secret-sender@service.com",
+                    "subject": "Very Secret Subject",
+                    "body_text": "Here is SensitiveSecret123 in body.",
+                    "links": ["https://service.com/login"],
+                    "source": "gmail",
+                    "opt_in_gemini": True,
+                },
+            )
+            assert resp.status_code == 200
+            assert gemini_spy.called is True
+            data = resp.json()
+            # Verify classification and score were updated by Gemini
+            assert data["classification"] == "phishing"
+            assert data["risk_score"] == 85
+            # Verify sensitive content from raw LLM reason is NOT persisted
+            reasons_text = " ".join(data["reasons"])
+            assert "SensitiveSecret123" not in reasons_text
+            assert "Very Secret Subject" not in reasons_text
+            assert "secret-sender@service.com" not in reasons_text
+            assert any("AI content analysis detected patterns" in r for r in data["reasons"])
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_gemini_reasons_and_evidence_do_not_contain_raw_email_text(self, client):
+        """Gemini-generated reasons containing sensitive email content must be replaced
+        with static templates.  Raw LLM evidence cannot enter the persisted evidence list
+        because GeminiAnalysisResult has no evidence field; this test verifies both
+        that raw LLM reason strings are stripped and that the evidence list contains
+        only deterministic heuristic findings with static explanations."""
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        SENSITIVE_BODY = "PRIVATE_BODY_CONTENT_DO_NOT_PERSIST"
+        SENSITIVE_SUBJECT = "PRIVATE_SUBJECT_DO_NOT_PERSIST"
+        SENSITIVE_SENDER = "private-sender-do-not-persist@secret.example.com"
+        SENSITIVE_LLM_REASON = (
+            f"The email body '{SENSITIVE_BODY}' from {SENSITIVE_SENDER} with "
+            f"subject '{SENSITIVE_SUBJECT}' is a phishing attempt."
+        )
+
+        class SensitiveGemini:
+            """Returns a result that embeds raw email content in its reason strings."""
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="phishing",
+                        risk_score=90,
+                        reasons=[SENSITIVE_LLM_REASON],
+                        confidence_label="high",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=SensitiveGemini(),
+        )
+        try:
+            resp = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": SENSITIVE_SENDER,
+                    "subject": SENSITIVE_SUBJECT,
+                    "body_text": SENSITIVE_BODY,
+                    "links": ["https://evil.example.com/login"],
+                    "source": "gmail",
+                    "opt_in_gemini": True,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+
+            # Classification and score from Gemini should be honoured
+            assert data["classification"] == "phishing"
+            assert data["risk_score"] == 90
+
+            # Build a combined blob of all persisted text for easy searching
+            all_text = " ".join(data["reasons"])
+            all_text += " ".join(
+                item["explanation"] for item in data["evidence"]
+            )
+
+            # Sensitive content from raw LLM reason must NOT appear anywhere
+            assert SENSITIVE_BODY not in all_text, (
+                "Raw email body content found in persisted scan data"
+            )
+            assert SENSITIVE_SUBJECT not in all_text, (
+                "Raw email subject found in persisted scan data"
+            )
+            assert SENSITIVE_SENDER not in all_text, (
+                "Raw sender address found in persisted scan data"
+            )
+            assert SENSITIVE_LLM_REASON not in all_text, (
+                "Verbatim LLM reason string found in persisted scan data"
+            )
+
+            # Static sanitized template must be present
+            assert any(
+                "AI content analysis detected patterns" in r for r in data["reasons"]
+            ), "Expected sanitized Gemini reason template not found"
+
+            # Evidence explanations must all be static deterministic strings
+            for item in data["evidence"]:
+                assert SENSITIVE_BODY not in item["explanation"]
+                assert SENSITIVE_SUBJECT not in item["explanation"]
+                assert SENSITIVE_SENDER not in item["explanation"]
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_gemini_failure_does_not_produce_false_safe_classification(self, client):
+        """When Gemini fails on an email scan with suspicious heuristic indicators,
+        it must not downgrade to likely_legitimate.
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class FailingGemini:
+            def analyze_target(self, **kwargs):
+                return None, ToolStatusDetail(status="error", reason_code="http_500")
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=FailingGemini(),
+        )
+        try:
+            resp = client.post(
+                "/api/v1/scans/email",
+                json={
+                    "sender": "alert@phish.com",
+                    "subject": "Urgent: Account Suspended",
+                    "body_text": "Your account has been suspended! Immediate action is required.",
+                    "links": ["https://192.168.1.1/login"],
+                    "source": "gmail",
+                    "opt_in_gemini": True,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["classification"] in ("phishing", "suspicious")
+            assert data["classification"] != "likely_legitimate"
+            assert data["tool_statuses"]["llm"]["status"] == "error"
+            assert data["analysis_status"] == "partial"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+
+class TestEmailScanScoringAndPartialAnalysisRegression:
+    """
+    Regression tests for the false-positive and partial-analysis messaging issues
+    identified in the Gmail phishing scan audit.
+
+    Background: A legitimate Google transactional email containing a 284-character
+    link produced:
+    - classification: suspicious
+    - risk_score: 60
+    - analysis_status: partial
+    - evidence: url_excessive_length (medium, 50 pts) + deep_subdomain_nesting
+      (medium) + excessive_hyphens (low) → score = 50 + 10 = 60.
+
+    Root causes:
+    1. url_excessive_length and deep_subdomain_nesting were 'medium' severity,
+       inflating the score when multiple correlated structural signals fire from
+       one URL. Both are now 'low' — 25 pts base, capped bonus.
+    2. opt_in_required Gemini status was classified as a runtime failure in the
+       UI, causing the partial-analysis banner to say 'Some checks could not
+       finish due to a service timeout or error' — wrong for an intentional gate.
+    """
+
+    def test_email_scan_long_link_does_not_produce_excessive_risk_score(self, client):
+        """An email with a single long (> 100 char) link that is otherwise structurally
+        clean must NOT score above 35. url_excessive_length alone (low, 25 pts) or
+        combined with other low-severity structural signals must not reach 60."""
+        payload = {
+            "sender": "no-reply@google.com",
+            "subject": "Set up your Google account",
+            "body_text": "Click the link to complete account setup.",
+            "links": [
+                "https://accounts.google.com/o/oauth2/auth"
+                "?client_id=1234567890"
+                "&redirect_uri=https%3A%2F%2Fmail.google.com%2Foauth2%2Fcallback"
+                "&response_type=code&scope=openid+email+profile"
+                "&state=CSRF_TOKEN_PLACEHOLDER_xyzxyzxyz"
+                "&nonce=NONCE_VALUE_abcdefghijklmnopqrstuvwxyz"
+                "&prompt=select_account"
+            ],
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        if data["risk_score"] is not None:
+            assert data["risk_score"] <= 35, (
+                f"Long legitimate link scored {data['risk_score']} — "
+                "correlated structural signals must not exceed 35."
+            )
+
+    def test_email_scan_opt_in_disabled_produces_correct_tool_status(self, client):
+        """With Gemini opt-in disabled (default), tool_statuses.llm must have
+        status=unavailable and reason_code=opt_in_required. This state is
+        intentional and must not be reported as a service crash."""
+        payload = {
+            "sender": "no-reply@google.com",
+            "subject": "Security notice",
+            "body_text": "Review your account activity.",
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        llm_status = data["tool_statuses"]["llm"]
+        assert llm_status["status"] == "unavailable"
+        assert llm_status["reason_code"] == "opt_in_required", (
+            "Gemini opt-in disabled must report reason_code='opt_in_required', "
+            "not a timeout or error code."
+        )
+
+    def test_email_scan_reputation_unintegrated_produces_correct_tool_status(self, client):
+        """Email scans must always report reputation as provider_not_integrated,
+        not as timeout or error."""
+        payload = {
+            "sender": "no-reply@google.com",
+            "subject": "Security notice",
+            "body_text": "Review your account.",
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        rep_status = data["tool_statuses"]["reputation"]
+        assert rep_status["status"] == "unavailable"
+        assert rep_status["reason_code"] == "provider_not_integrated", (
+            "Email scan reputation must be provider_not_integrated — "
+            "email reputation is out of scope, not a runtime failure."
+        )
+
+    def test_email_scan_long_url_evidence_severity_is_low(self, client):
+        """The url_excessive_length evidence item must carry severity='low'.
+        Verifies that the heuristic severity downgrade is applied end-to-end."""
+        long_link = (
+            "https://email.company.com/unsubscribe"
+            "?token=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            "&list=newsletter&user=encoded_id_123456"
+            "&sig=HMAC_SIGNATURE_VALUE_PLACEHOLDER_abcdef"
+        )
+        assert len(long_link) > 100
+
+        payload = {
+            "sender": "newsletter@company.com",
+            "subject": "Your weekly digest",
+            "body_text": "Unsubscribe from this list.",
+            "links": [long_link],
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        length_evidence = [
+            e for e in data["evidence"] if e["type"] == "url_excessive_length"
+        ]
+        for item in length_evidence:
+            assert item["severity"] == "low", (
+                f"url_excessive_length severity must be 'low' in API response, "
+                f"got '{item['severity']}'."
+            )
+
+    def test_email_scan_deep_subdomain_nesting_severity_is_low(self, client):
+        """The deep_subdomain_nesting evidence item must carry severity='low'.
+        Verifies end-to-end that the severity downgrade takes effect."""
+        link_with_deep_nesting = "https://login.secure.verify.accounts.example.com/auth?token=abc"
+
+        payload = {
+            "sender": "alerts@example.com",
+            "subject": "Account verification",
+            "body_text": "Please click the link.",
+            "links": [link_with_deep_nesting],
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        nesting_evidence = [
+            e for e in data["evidence"] if e["type"] == "deep_subdomain_nesting"
+        ]
+        for item in nesting_evidence:
+            assert item["severity"] == "low", (
+                f"deep_subdomain_nesting severity must be 'low', got '{item['severity']}'."
+            )
+
+    def test_website_scan_misleading_subdomain_still_reaches_phishing_threshold(self, client):
+        """Website scanning behavior must be unaffected. A misleading subdomain
+        still scores >= 70 and classifies as phishing."""
+        payload = {
+            "url": "https://paypal.com.account-secure-verify.phish-test.xyz/login",
+            "source": "manual_website",
+        }
+        response = client.post("/api/v1/scans/website", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["classification"] == "phishing", (
+            "misleading_subdomain must still classify as phishing for website scans."
+        )
+        assert data["risk_score"] is not None
+        assert data["risk_score"] >= 70, (
+            f"misleading_subdomain must score >= 70, got {data['risk_score']}."
+        )
+        assert any(
+            e["type"] == "misleading_subdomain" for e in data["evidence"]
+        )
+
+    def test_website_scan_clean_url_unaffected(self, client):
+        """Clean website scans produce no evidence (unchanged behavior)."""
+        payload = {
+            "url": "https://en.wikipedia.org/wiki/Computer_security",
+            "source": "auto_website",
+        }
+        response = client.post("/api/v1/scans/website", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        # Clean domain should produce no heuristic evidence
+        heuristic_evidence = [e for e in data["evidence"] if e["source"] == "heuristics"]
+        assert heuristic_evidence == [], (
+            f"Clean Wikipedia URL must produce no heuristic evidence, got {heuristic_evidence}"
+        )
+
+    def test_clean_email_scan_returns_partial_status_with_null_classification_and_score(self, client):
+        """A clean email scan with 0 heuristic findings and external providers skipped
+        (Gemini opt-in required, reputation unintegrated) must return:
+        - HTTP 200
+        - analysis_status="partial" (NOT "unavailable")
+        - classification=None (NOT likely_legitimate)
+        - risk_score=None (NOT 0)
+        - heuristics tool status="complete"
+        - llm status="unavailable" with reason_code="opt_in_required"
+        - reputation status="unavailable" with reason_code="provider_not_integrated"
+        - reason clarifying that deterministic heuristics completed without finding suspicious indicators.
+        """
+        payload = {
+            "sender": "no-reply@google.com",
+            "subject": "Test of phishing detection",
+            "body_text": "This email is for test purpose only",
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["analysis_status"] == "partial", (
+            f"Expected analysis_status='partial', got '{data['analysis_status']}'"
+        )
+        assert data["classification"] is None, (
+            f"Expected classification=None, got {data['classification']}"
+        )
+        assert data["risk_score"] is None, (
+            f"Expected risk_score=None, got {data['risk_score']}"
+        )
+        assert data["evidence"] == []
+
+        tool_statuses = data["tool_statuses"]
+        assert tool_statuses["heuristics"]["status"] == "complete"
+        assert tool_statuses["llm"]["status"] == "unavailable"
+        assert tool_statuses["llm"]["reason_code"] == "opt_in_required"
+        assert tool_statuses["reputation"]["status"] == "unavailable"
+        assert tool_statuses["reputation"]["reason_code"] == "provider_not_integrated"
+
+        assert any(
+            "Deterministic heuristics completed without finding suspicious indicators" in r
+            for r in data["reasons"]
+        ), f"Expected clean heuristics explanation in reasons: {data['reasons']}"
+        assert any(
+            "AI content analysis is disabled" in r or "External AI analysis is disabled" in r
+            for r in data["reasons"]
+        )
+
+    def test_clean_email_scan_with_gemini_opt_in_enabled_returns_likely_legitimate(self, client):
+        """When Gemini is explicitly opted into and returns likely_legitimate with score 10,
+        the email scan returns likely_legitimate with score 10 and analysis_status='partial'
+        (since reputation is unintegrated).
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.providers.gemini import GeminiAnalysisResult
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class CleanEmailGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    GeminiAnalysisResult(
+                        classification="likely_legitimate",
+                        risk_score=10,
+                        reasons=["Email body appears normal and transactional."],
+                        confidence_label="low",
+                    ),
+                    ToolStatusDetail(status="complete"),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=CleanEmailGemini()
+        )
+        try:
+            payload = {
+                "sender": "no-reply@google.com",
+                "subject": "Test of phishing detection",
+                "body_text": "This email is for test purpose only",
+                "source": "gmail",
+                "opt_in_gemini": True,
+            }
+            response = client.post("/api/v1/scans/email", json=payload)
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["classification"] == "likely_legitimate"
+            assert data["risk_score"] == 10
+            assert data["analysis_status"] == "partial"
+            assert data["tool_statuses"]["llm"]["status"] == "complete"
+            assert data["tool_statuses"]["heuristics"]["status"] == "complete"
+            assert data["tool_statuses"]["reputation"]["status"] == "unavailable"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_heuristics_exception_returns_unavailable_status(self, client):
+        """When the heuristics engine raises an unhandled exception, the scan must return
+        analysis_status='unavailable', classification=None, risk_score=None, and
+        heuristics tool status='error'.
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+
+        class CrashingHeuristicsEngine:
+            def analyze_email(self, **kwargs):
+                raise RuntimeError("Unexpected failure in heuristics engine")
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            heuristics=CrashingHeuristicsEngine()
+        )
+        try:
+            payload = {
+                "sender": "no-reply@google.com",
+                "subject": "Test notice",
+                "body_text": "Content",
+                "source": "gmail",
+            }
+            response = client.post("/api/v1/scans/email", json=payload)
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "unavailable"
+            assert data["classification"] is None
+            assert data["risk_score"] is None
+            assert data["tool_statuses"]["heuristics"]["status"] == "error"
+            assert data["tool_statuses"]["heuristics"]["reason_code"] == "heuristics_exception"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_gemini_timeout_with_clean_heuristics_returns_unavailable(self, client):
+        """When Gemini is enabled but times out, and heuristics found 0 indicators,
+        the scan must return analysis_status='unavailable' (not partial or likely_legitimate).
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class TimingOutGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    None,
+                    ToolStatusDetail(
+                        status="timeout",
+                        reason_code="request_timeout",
+                    ),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=TimingOutGemini()
+        )
+        try:
+            payload = {
+                "sender": "no-reply@google.com",
+                "subject": "Clean email",
+                "body_text": "Clean body",
+                "source": "gmail",
+                "opt_in_gemini": True,
+            }
+            response = client.post("/api/v1/scans/email", json=payload)
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "unavailable"
+            assert data["classification"] is None
+            assert data["risk_score"] is None
+            assert data["tool_statuses"]["llm"]["status"] == "timeout"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_email_scan_gemini_error_with_clean_heuristics_returns_unavailable(self, client):
+        """When Gemini returns an error and heuristics found 0 indicators,
+        the scan must return analysis_status='unavailable'.
+        """
+        from backend.app.api.v1.scans import get_orchestrator
+        from backend.app.detection.orchestrator import RealDetectionOrchestrator
+        from backend.app.schemas.scan import ToolStatusDetail
+
+        class FailingGemini:
+            def analyze_target(self, **kwargs):
+                return (
+                    None,
+                    ToolStatusDetail(
+                        status="error",
+                        reason_code="internal_provider_error",
+                    ),
+                )
+
+        app.dependency_overrides[get_orchestrator] = lambda: RealDetectionOrchestrator(
+            gemini=FailingGemini()
+        )
+        try:
+            payload = {
+                "sender": "no-reply@google.com",
+                "subject": "Clean email",
+                "body_text": "Clean body",
+                "source": "gmail",
+                "opt_in_gemini": True,
+            }
+            response = client.post("/api/v1/scans/email", json=payload)
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["analysis_status"] == "unavailable"
+            assert data["classification"] is None
+            assert data["risk_score"] is None
+            assert data["tool_statuses"]["llm"]["status"] == "error"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
+
+    def test_reputation_unavailable_alone_does_not_cause_unavailable_with_heuristic_evidence(self, client):
+        """When heuristics detects suspicious indicators in an email, the scan returns
+        analysis_status='partial' (due to unintegrated reputation), NOT 'unavailable'.
+        """
+        payload = {
+            "sender": "security@alert-paypal.com",
+            "subject": "Account suspension warning",
+            "body_text": "Please verify your account immediately.",
+            "links": ["https://paypal.com.verify-account.phish-test.xyz/login"],
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["analysis_status"] == "partial"
+        assert data["classification"] in ("suspicious", "phishing")
+        assert data["risk_score"] is not None and data["risk_score"] >= 40
+        assert data["tool_statuses"]["reputation"]["status"] == "unavailable"
+
+    def test_email_scan_multiple_long_urls_deduplicates_scoring_and_evidence(self, client):
+        """A legitimate email (such as Meetup) containing multiple long URLs must
+        produce a single consolidated url_excessive_length evidence item and score 25/100,
+        not inflating to 45/100 due to repeated instances of the same heuristic."""
+        long_meetup_links = [
+            f"https://www.meetup.com/ny-tech-meetup/events/rsvp?token=PRIV_TOKEN_{i}_abcdef123456&source=digest&sig=SIGNATURE_{i}_xyz"
+            for i in range(5)
+        ]
+        for link in long_meetup_links:
+            assert len(link) > 100
+
+        payload = {
+            "sender": "events@meetup.com",
+            "subject": "Upcoming tech meetups this week",
+            "body_text": "Join us for great conversations and presentations.",
+            "links": long_meetup_links,
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        # Score must be 25 (NOT 45)
+        assert data["risk_score"] == 25, (
+            f"5 long URLs inflated risk score to {data['risk_score']} — expected 25."
+        )
+        assert data["classification"] == "suspicious"
+        assert data["analysis_status"] == "partial"
+
+        # Evidence must contain exactly 1 consolidated url_excessive_length item
+        length_items = [e for e in data["evidence"] if e["type"] == "url_excessive_length"]
+        assert len(length_items) == 1, (
+            f"Expected exactly 1 url_excessive_length finding, got {len(length_items)}"
+        )
+        item = length_items[0]
+        assert "5 links in this email exceed 100 characters in length" in item["explanation"]
+        assert "longest is" in item["explanation"]
+
+        # Privacy verification: No sensitive tokens, usernames, or raw URLs in explanation
+        for i in range(5):
+            assert f"PRIV_TOKEN_{i}" not in item["explanation"]
+            assert f"SIGNATURE_{i}" not in item["explanation"]
+        assert "https://" not in item["explanation"]
+
+        # Reasons list must contain no duplicate strings
+        assert len(data["reasons"]) == len(set(data["reasons"])), (
+            f"data['reasons'] contains duplicate strings: {data['reasons']}"
+        )
+
+    def test_email_scan_ten_long_urls_produces_identical_score_to_single_long_url(self, client):
+        """Ten long URLs must not produce a higher score than one long URL."""
+        one_link_payload = {
+            "sender": "info@example.com",
+            "subject": "Notice",
+            "body_text": "Click here.",
+            "links": [
+                "https://www.example.com/very/long/tracking/url/with/lots/of/parameters/to/reach/length/above/one/hundred/characters?tracking_id=12345"
+            ],
+            "source": "gmail",
+        }
+        resp1 = client.post("/api/v1/scans/email", json=one_link_payload)
+        assert resp1.status_code == 200
+        score_1 = resp1.json()["risk_score"]
+        assert score_1 == 25
+
+        ten_links_payload = {
+            "sender": "info@example.com",
+            "subject": "Notice",
+            "body_text": "Click here.",
+            "links": [
+                f"https://www.example.com/very/long/tracking/url/with/lots/of/parameters/to/reach/length/above/one/hundred/characters?tracking_id=12345_{i}"
+                for i in range(10)
+            ],
+            "source": "gmail",
+        }
+        resp10 = client.post("/api/v1/scans/email", json=ten_links_payload)
+        assert resp10.status_code == 200
+        score_10 = resp10.json()["risk_score"]
+        assert score_10 == 25, (
+            f"Ten long URLs scored {score_10}, expected identical score to 1 URL ({score_1})"
+        )
+
+    def test_email_scan_multiple_long_urls_with_phishing_link_maintains_phishing_verdict(self, client):
+        """When multiple long URLs are accompanied by an independent high-confidence
+        indicator (misleading_subdomain), the high-severity finding retains its full weight
+        and reaches phishing classification (>= 70)."""
+        links = [
+            f"https://www.legitimate-service.com/tracking/path/with/long/parameters?param={i}_{'x'*80}"
+            for i in range(5)
+        ] + ["https://paypal.com.verify-login.evil-phish.xyz/account"]
+
+        payload = {
+            "sender": "alerts@security-notice.com",
+            "subject": "Account alert",
+            "body_text": "Verify your account immediately.",
+            "links": links,
+            "source": "gmail",
+        }
+        response = client.post("/api/v1/scans/email", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["classification"] == "phishing"
+        assert data["risk_score"] is not None
+        assert data["risk_score"] >= 70
+        # High base (75) + 2 extra independent categories (url_excessive_length + deep_subdomain_nesting) * 5 = 85
+        assert data["risk_score"] == 85
+        evidence_types = {e["type"] for e in data["evidence"]}
+        assert "misleading_subdomain" in evidence_types
+        assert "url_excessive_length" in evidence_types
+        assert "deep_subdomain_nesting" in evidence_types

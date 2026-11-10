@@ -83,10 +83,21 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             return None
 
         severity_scores = {"low": 25, "medium": 50, "high": 75}
-        strongest = max(
-            severity_scores.get(item.severity, 25) for item in evidence
-        )
-        additional_findings = min(max(len(evidence) - 1, 0) * 5, 20)
+
+        # Deduplicate risk scoring by heuristic rule code (item.type) within a scan.
+        # Repeated instances of the same heuristic rule code must not independently
+        # inflate the risk score.
+        rule_scores: dict[str, int] = {}
+        for item in evidence:
+            score = severity_scores.get(item.severity, 25)
+            rule_type = item.type
+            if rule_type not in rule_scores or score > rule_scores[rule_type]:
+                rule_scores[rule_type] = score
+
+        strongest = max(rule_scores.values())
+        # Independent heuristic categories beyond the first contribute 5 points each, capped at 20.
+        additional_categories = max(len(rule_scores) - 1, 0)
+        additional_findings = min(additional_categories * 5, 20)
         return min(strongest + additional_findings, 95)
 
     @staticmethod
@@ -104,7 +115,11 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         llm_status: ToolStatusDetail,
         reputation_status: ToolStatusDetail | None = None,
         reputation_evidence: list[EvidenceItem] | None = None,
+        target_type: str = "website",
+        heuristics_status: ToolStatusDetail | None = None,
     ) -> DetectionResult:
+        if heuristics_status is None:
+            heuristics_status = ToolStatusDetail(status="complete")
         if reputation_status is None:
             reputation_status = ToolStatusDetail(
                 status="unavailable",
@@ -140,9 +155,80 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         llm_score = llm_result.risk_score if llm_result is not None else None
 
         if heuristic_score is None and llm_score is None:
+            # 1. Distinguish execution failures:
+            # - Heuristics raised an internal exception or did not complete.
+            # - Gemini or Reputation suffered a runtime timeout or error.
+            heuristics_failed = heuristics_status.status != "complete"
+            llm_runtime_failed = llm_status.status in ("timeout", "error")
+            reputation_runtime_failed = reputation_status.status in ("timeout", "error")
+
+            is_runtime_failure = (
+                heuristics_failed
+                or llm_runtime_failed
+                or reputation_runtime_failed
+            )
+
+            # 2. When heuristics ran to completion and found zero suspicious indicators,
+            # and external providers were intentionally skipped (e.g. Gemini opt-in disabled
+            # for email) or not integrated (email reputation), produce an inconclusive
+            # partial analysis rather than treating it as an unavailable operational error.
+            is_intentional_skip = (
+                target_type == "email"
+                or llm_status.reason_code == "opt_in_required"
+            )
+
+            if not is_runtime_failure and is_intentional_skip:
+                partial_reasons = [
+                    "Deterministic heuristics completed without finding suspicious indicators."
+                ]
+                if llm_status.reason_code == "opt_in_required":
+                    partial_reasons.append(
+                        "External AI content analysis is disabled (opt-in required)."
+                    )
+                elif llm_status.reason_code == "no_api_key":
+                    partial_reasons.append(
+                        "Content analysis is not configured."
+                    )
+
+                if reputation_status.reason_code == "provider_not_integrated":
+                    partial_reasons.append(
+                        "Reputation checking is not integrated, so this assessment does not include a reputation lookup."
+                    )
+                elif reputation_status.status == "unavailable":
+                    partial_reasons.append(
+                        f"Reputation lookup was unavailable ({reputation_status.reason_code or 'service_unavailable'})."
+                    )
+
+                partial_reasons.append(
+                    "This assessment is inconclusive and does not establish that the target is safe."
+                )
+
+                return DetectionResult(
+                    classification=None,
+                    risk_score=None,
+                    reasons=partial_reasons,
+                    evidence=all_evidence,
+                    tool_statuses=ToolStatuses(
+                        heuristics=heuristics_status,
+                        reputation=reputation_status,
+                        llm=llm_status,
+                    ),
+                    analysis_status="partial",
+                )
+
+            # Otherwise (actual heuristic failure, LLM timeout/error, or unavailable website analysis):
             unavail_reasons = [
                 "No usable assessment was produced. This does not establish that the target is safe."
             ]
+            if heuristics_status.status == "error":
+                unavail_reasons.append(
+                    "Deterministic heuristics encountered an internal error and could not be completed."
+                )
+            elif heuristics_status.status != "complete":
+                unavail_reasons.append(
+                    "Deterministic heuristics could not be completed."
+                )
+
             if llm_status.status == "timeout":
                 unavail_reasons.append(
                     "Content analysis timed out and could not be completed."
@@ -179,7 +265,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
                 reasons=unavail_reasons,
                 evidence=all_evidence,
                 tool_statuses=ToolStatuses(
-                    heuristics=ToolStatusDetail(status="complete"),
+                    heuristics=heuristics_status,
                     reputation=reputation_status,
                     llm=llm_status,
                 ),
@@ -201,12 +287,33 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             has_evidence=bool(all_evidence),
         )
 
-        reasons = [item.explanation for item in all_evidence if item.explanation]
+        reasons = list(dict.fromkeys(item.explanation for item in all_evidence if item.explanation))
 
         if llm_result is not None:
-            reasons.extend(
-                reason for reason in llm_result.reasons if reason not in reasons
-            )
+            if target_type == "email":
+                # Privacy guardrail for email scans:
+                # Map recognized model outcome to predefined sanitized advisory summaries.
+                # Never append arbitrary or raw LLM-generated reason strings to persisted reasons.
+                sanitized_email_reasons = []
+                if llm_result.classification == "phishing":
+                    sanitized_email_reasons.append(
+                        "AI content analysis detected patterns strongly associated with deceptive phishing communication."
+                    )
+                elif llm_result.classification == "suspicious":
+                    sanitized_email_reasons.append(
+                        "AI content analysis noted unusual communication characteristics requiring caution."
+                    )
+                elif llm_result.classification == "likely_legitimate":
+                    sanitized_email_reasons.append(
+                        "AI content analysis did not detect strong social-engineering indicators."
+                    )
+                for sr in sanitized_email_reasons:
+                    if sr not in reasons:
+                        reasons.append(sr)
+            else:
+                reasons.extend(
+                    reason for reason in llm_result.reasons if reason not in reasons
+                )
 
         if not reasons:
             reasons.append(
@@ -262,7 +369,7 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             reasons=reasons,
             evidence=all_evidence,
             tool_statuses=ToolStatuses(
-                heuristics=ToolStatusDetail(status="complete"),
+                heuristics=heuristics_status,
                 reputation=reputation_status,
                 llm=llm_status,
             ),
@@ -280,12 +387,21 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
     ) -> DetectionResult:
         started = time.monotonic()
 
-        evidence = self._heuristics.analyze_website(
-            url=url,
-            target_reference=target_reference,
-            page_title=page_title,
-            visible_text=visible_text,
-        )
+        try:
+            evidence = self._heuristics.analyze_website(
+                url=url,
+                target_reference=target_reference,
+                page_title=page_title,
+                visible_text=visible_text,
+            )
+            heuristics_status = ToolStatusDetail(status="complete")
+        except Exception as exc:
+            logger.exception("Heuristics evaluation failed for website scan: %s", exc)
+            evidence = []
+            heuristics_status = ToolStatusDetail(
+                status="error",
+                reason_code="heuristics_exception",
+            )
         logger.debug("Heuristics evaluation completed in %.2fs", time.monotonic() - started)
 
         if opt_in_gemini:
@@ -337,6 +453,8 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             llm_status=llm_status,
             reputation_status=reputation_status,
             reputation_evidence=reputation_evidence,
+            target_type="website",
+            heuristics_status=heuristics_status,
         )
         logger.debug("Evidence combination completed in %.2fs", time.monotonic() - started)
 
@@ -350,33 +468,50 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
         body_text: str | None = None,
         links: list[str] | None = None,
         primary_domain: str = "email-scan",
+        opt_in_gemini: bool = False,
     ) -> DetectionResult:
         email_links = links or []
-        evidence = self._heuristics.analyze_email(
-            sender=sender,
-            subject=subject,
-            body_text=body_text,
-            links=email_links,
-        )
-
-        # Send bounded message content and the existing primary reference.
-        # Do not send full link URLs, which may contain private query tokens.
-        llm_text = "\n".join(
-            part
-            for part in (
-                f"Sender: {sender}" if sender else "",
-                f"Links: {len(email_links)} extracted link(s)",
-                body_text,
+        try:
+            evidence = self._heuristics.analyze_email(
+                sender=sender,
+                subject=subject,
+                body_text=body_text,
+                links=email_links,
             )
-            if part
-        )[:3000]
+            heuristics_status = ToolStatusDetail(status="complete")
+        except Exception as exc:
+            logger.exception("Heuristics evaluation failed for email scan: %s", exc)
+            evidence = []
+            heuristics_status = ToolStatusDetail(
+                status="error",
+                reason_code="heuristics_exception",
+            )
 
-        llm_result, llm_status = self._gemini.analyze_target(
-            target_type="email",
-            url_or_domain=primary_domain,
-            title=subject,
-            text=llm_text or None,
-        )
+        if opt_in_gemini:
+            # Send bounded message content and the existing primary reference.
+            # Do not send full link URLs, which may contain private query tokens.
+            llm_text = "\n".join(
+                part
+                for part in (
+                    f"Sender: {sender}" if sender else "",
+                    f"Links: {len(email_links)} extracted link(s)",
+                    body_text,
+                )
+                if part
+            )[:3000]
+
+            llm_result, llm_status = self._gemini.analyze_target(
+                target_type="email",
+                url_or_domain=primary_domain,
+                title=subject,
+                text=llm_text or None,
+            )
+        else:
+            llm_result = None
+            llm_status = ToolStatusDetail(
+                status="unavailable",
+                reason_code="opt_in_required",
+            )
 
         # Phase 1: Email reputation integration is strictly out of scope.
         # Email scans must not invoke the website reputation adapter.
@@ -390,6 +525,8 @@ class RealDetectionOrchestrator(BaseDetectionOrchestrator):
             llm_result=llm_result,
             llm_status=llm_status,
             reputation_status=reputation_status,
+            target_type="email",
+            heuristics_status=heuristics_status,
         )
 
 
@@ -459,6 +596,7 @@ class MockDetectionOrchestrator(BaseDetectionOrchestrator):
         body_text: str | None = None,
         links: list[str] | None = None,
         primary_domain: str = "email-scan",
+        opt_in_gemini: bool = False,
     ) -> DetectionResult:
         return self._result(
             f"{sender or ''} {subject or ''} {body_text or ''} {' '.join(links or [])}"
