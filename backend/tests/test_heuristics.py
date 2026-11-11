@@ -22,6 +22,7 @@ from backend.app.detection.heuristics import (
     detect_ip_hostname,
     detect_misleading_subdomains,
     detect_punycode_and_lookalike,
+    detect_suspicious_script_endpoint,
     detect_urgency_and_credential_language,
     detect_url_structure_anomalies,
 )
@@ -1327,3 +1328,117 @@ class TestEvidenceItemFieldStability:
         assert score == 80
         classification = orch._classification_for_score(score, has_evidence=True)
         assert classification == "phishing"
+
+
+# ===========================================================================
+# 8. detect_suspicious_script_endpoint
+# ===========================================================================
+
+class TestDetectSuspiciousScriptEndpoint:
+    """Offline unit and regression tests for detect_suspicious_script_endpoint."""
+
+    @pytest.mark.parametrize(
+        "url,expected_endpoint",
+        [
+            ("https://example.com/captcha.php", "captcha.php"),
+            ("https://example.com/antibot/captcha.php", "captcha.php"),
+            ("https://example.com/pages/captcha.php?sid=123", "captcha.php"),
+            ("https://example.org/webscr.php", "webscr.php"),
+            ("https://example.org/cgi-bin/webscr.php?cmd=_login", "webscr.php"),
+            ("https://example.net/checkpoint.php", "checkpoint.php"),
+            ("https://example.net/auth/checkpoint.php?ref=home", "checkpoint.php"),
+            # Case Insensitivity
+            ("https://example.com/CAPTCHA.PHP", "captcha.php"),
+            ("https://example.org/WebScr.Php", "webscr.php"),
+            ("https://example.net/CheckPoint.PHP?action=verify", "checkpoint.php"),
+            # URL Percent-Encoded Endpoint Filenames
+            ("https://example.com/%63%61%70%74%63%68%61%2e%70%68%70", "captcha.php"),
+            ("https://example.org/gate/%77%65%62%73%63%72%2e%70%68%70", "webscr.php"),
+            ("https://example.net/%63%68%65%63%6b%70%6f%69%6e%74%2e%70%68%70", "checkpoint.php"),
+            # Trailing Slash Handling on Script Endpoints
+            ("https://example.com/captcha.php/", "captcha.php"),
+            ("https://example.org/webscr.php/", "webscr.php"),
+        ],
+    )
+    def test_positive_phishing_script_endpoints(self, url: str, expected_endpoint: str) -> None:
+        item = detect_suspicious_script_endpoint(url)
+        assert item is not None
+        assert_evidence_item(
+            item,
+            expected_type="path_suspicious_script_endpoint",
+            expected_severity="medium",
+        )
+        assert expected_endpoint.lower() in item.explanation.lower()
+
+    @pytest.mark.parametrize(
+        "clean_url",
+        [
+            # Strictly Excluded Keywords (False Positive Avoidance)
+            "https://example.com/submit.php",
+            "https://example.com/contact/submit.php?form=feedback",
+            "https://example.org/session.php",
+            "https://example.org/api/session.php",
+            # Standard Clean URLs
+            "https://example.com/index.php",
+            "https://example.com/login.php",
+            "https://example.org/home.html",
+            "https://example.net/about-us",
+            "https://example.com/api/v1/captcha/verify",
+            # Substring / Suffix Distinctions (Must NOT Match)
+            "https://example.com/not_captcha.php",
+            "https://example.com/webscr_helper.php",
+            "https://example.com/captcha.php.png",
+            "https://example.com/checkpoint.php.bak",
+            "https://example.com/fake_checkpoint.php",
+            # Query-Only Occurrences (Must NOT Match Path Detector)
+            "https://example.com/search.php?q=captcha.php",
+            "https://example.com/article?title=webscr.php",
+            "https://example.org/index.html?ref=checkpoint.php",
+            # Fragment-Only Occurrences (Must NOT Match Path Detector)
+            "https://example.com/docs#captcha.php",
+            "https://example.org/portal#webscr.php",
+            # Root or Clean Paths
+            "https://example.com/",
+            "https://example.com",
+        ],
+    )
+    def test_negative_controls_produce_no_evidence(self, clean_url: str) -> None:
+        item = detect_suspicious_script_endpoint(clean_url)
+        assert item is None
+
+    def test_website_scanner_integration(self) -> None:
+        """Website analysis returns the new EvidenceItem for a matching URL and not for a non-matching URL."""
+        engine = DeterministicHeuristicsEngine()
+
+        # Matching website scan
+        matching_url = "https://phish-kit.example.com/antibot/captcha.php"
+        evidence_matching = engine.analyze_website(
+            url=matching_url,
+            target_reference="phish-kit.example.com",
+        )
+        matching_types = types_of(evidence_matching)
+        assert "path_suspicious_script_endpoint" in matching_types
+
+        # Non-matching website scan
+        clean_url = "https://clean-site.example.com/contact/submit.php"
+        evidence_clean = engine.analyze_website(
+            url=clean_url,
+            target_reference="clean-site.example.com",
+        )
+        clean_types = types_of(evidence_clean)
+        assert "path_suspicious_script_endpoint" not in clean_types
+
+    def test_email_scanner_isolation(self) -> None:
+        """Email analysis does NOT acquire this rule through extracted email links."""
+        engine = DeterministicHeuristicsEngine()
+
+        # Email containing a link with captcha.php
+        suspicious_link = "https://phish-kit.example.com/antibot/captcha.php"
+        evidence_email = engine.analyze_email(
+            subject="Action Required",
+            body_text="Please verify your account.",
+            links=[suspicious_link],
+        )
+        email_types = types_of(evidence_email)
+        # Verify that path_suspicious_script_endpoint is NOT present in email evidence
+        assert "path_suspicious_script_endpoint" not in email_types

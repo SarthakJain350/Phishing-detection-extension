@@ -88,3 +88,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Evaluation datasets and raw feeds (Phase 5)
+data/
+evaluation/data/
+*.jsonl

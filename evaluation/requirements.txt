@@ -1,0 +1,6 @@
+# Phase 5 Dataset Evaluation Dependencies
+# Minimal requirements for offline dataset preparation and deterministic evaluation.
+# Aligns with backend requirements without adding external network or scraping libraries.
+
+pydantic>=2.6.0
+tldextract>=5.1.2

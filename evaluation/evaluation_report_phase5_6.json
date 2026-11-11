@@ -1,0 +1,80 @@
+{
+  "total_samples": 9984,
+  "conclusive_count": 778,
+  "inconclusive_count": 9206,
+  "coverage_rate": 7.792467948717949,
+  "ground_truth_distribution": {
+    "phishing": 4984,
+    "legitimate": 5000
+  },
+  "source_distribution": {
+    "phishtank": 4984,
+    "tranco": 5000
+  },
+  "status_distribution": {
+    "partial": 9984
+  },
+  "classification_matrix": {
+    "phishing": {
+      "inconclusive (None)": 4213,
+      "phishing": 26,
+      "suspicious": 745
+    },
+    "legitimate": {
+      "inconclusive (None)": 4993,
+      "suspicious": 3,
+      "phishing": 4
+    }
+  },
+  "heuristic_rule_activations": {
+    "misleading_subdomain": 15,
+    "ip_hostname": 5,
+    "punycode_homoglyph": 8,
+    "excessive_hyphens": 456,
+    "url_excessive_length": 237,
+    "path_suspicious_script_endpoint": 25,
+    "deep_subdomain_nesting": 57,
+    "at_symbol_redirect": 2
+  },
+  "policies": {
+    "policy_a_high_confidence": {
+      "total": 9984,
+      "true_positives": 26,
+      "false_positives": 4,
+      "true_negatives": 4996,
+      "false_negatives": 4958,
+      "precision": 0.8666666666666667,
+      "recall": 0.00521669341894061,
+      "specificity": 0.9992,
+      "false_positive_rate": 0.0008,
+      "f1_score": 0.010370961308336658,
+      "accuracy": 0.5030048076923077
+    },
+    "policy_b_actionable_threat": {
+      "total": 9984,
+      "true_positives": 771,
+      "false_positives": 7,
+      "true_negatives": 4993,
+      "false_negatives": 4213,
+      "precision": 0.9910025706940874,
+      "recall": 0.15469502407704655,
+      "specificity": 0.9986,
+      "false_positive_rate": 0.0014,
+      "f1_score": 0.2676154113155155,
+      "accuracy": 0.577323717948718
+    },
+    "policy_c_conclusive_only": {
+      "total": 778,
+      "true_positives": 771,
+      "false_positives": 7,
+      "true_negatives": 0,
+      "false_negatives": 0,
+      "precision": 0.9910025706940874,
+      "recall": 1.0,
+      "specificity": 0.0,
+      "false_positive_rate": 1.0,
+      "f1_score": 0.9954809554551323,
+      "accuracy": 0.9910025706940874
+    }
+  }
+}

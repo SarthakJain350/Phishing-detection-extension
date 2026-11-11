@@ -24,6 +24,8 @@ RULE IDENTIFIERS (stable, machine-readable, suitable for serialization):
                              engineering pressure tactics.
   credential_harvesting_language - Explicit credential-solicitation language
                              rarely used by legitimate services in page text.
+  path_suspicious_script_endpoint - Standalone script endpoint frequently
+                             deployed in phishing kits (e.g. captcha.php, webscr.php).
 """
 
 from __future__ import annotations
@@ -339,6 +341,65 @@ def detect_url_structure_anomalies(url: str) -> list[EvidenceItem]:
     return evidence
 
 
+# ---------------------------------------------------------------------------
+# Suspicious script endpoint detector
+# ---------------------------------------------------------------------------
+
+_SUSPICIOUS_SCRIPT_ENDPOINT_RE = re.compile(
+    r"(?:^|/)(?P<endpoint>captcha|webscr|checkpoint)\.php$",
+    re.IGNORECASE,
+)
+
+
+def detect_suspicious_script_endpoint(url: str) -> EvidenceItem | None:
+    """Return an EvidenceItem if the URL's path ends in a known phishing kit script.
+
+    Target endpoints (strictly case-insensitive, complete path-segment matches):
+    - captcha.php: Phishing kit anti-bot challenge and reverse-proxy cloaking gate.
+    - webscr.php: Classic credential-harvesting endpoint mimicking payment/auth workflows.
+    - checkpoint.php: Account challenge/verification harvester.
+
+    Explicitly excluded due to legitimate web usage:
+    - submit.php
+    - session.php
+
+    Args:
+        url: The full URL submitted for scanning.
+
+    Returns:
+        EvidenceItem if path targets a suspicious script endpoint; None otherwise.
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        raw_path = parsed.path or ""
+        # Percent-decode the path exactly once using unquote
+        decoded_path = urllib.parse.unquote(raw_path)
+        # Strip trailing slashes to evaluate the terminal file segment
+        clean_path = decoded_path.rstrip("/")
+        if not clean_path:
+            return None
+
+        # Extract the terminal path segment
+        filename = clean_path.split("/")[-1]
+
+        match = _SUSPICIOUS_SCRIPT_ENDPOINT_RE.match(filename)
+        if match:
+            endpoint = match.group("endpoint").lower() + ".php"
+            return EvidenceItem(
+                type="path_suspicious_script_endpoint",
+                source="heuristics",
+                severity="medium",
+                explanation=(
+                    f"The URL targets a standalone script endpoint ({endpoint!r}) frequently "
+                    "deployed in phishing kits for credential harvesting, bot cloaking, or "
+                    "payment interface spoofing."
+                ),
+            )
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def detect_urgency_and_credential_language(text: str | None) -> list[EvidenceItem]:
     """Return EvidenceItems for urgency or credential-harvesting language found in page text.
 
@@ -448,6 +509,10 @@ class DeterministicHeuristicsEngine:
 
         evidence.extend(detect_misleading_subdomains(url))
         evidence.extend(detect_url_structure_anomalies(url))
+
+        script_evidence = detect_suspicious_script_endpoint(url)
+        if script_evidence:
+            evidence.append(script_evidence)
 
         # --- Text / content checks ---
         # Combine page title and visible text; both are optional

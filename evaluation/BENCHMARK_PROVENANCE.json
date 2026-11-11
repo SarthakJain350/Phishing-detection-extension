@@ -1,0 +1,15 @@
+﻿{
+    "benchmark_name":  "Phishing_Detector_Phase5_Baseline",
+    "created_at_utc":  "2026-11-11T06:07:07Z",
+    "phishtank_snapshot":  {
+                               "filename":  "phishtank_online_valid_20261111_0606.csv.gz",
+                               "sha256":  "4f525f425c335c336e71b1c803c308001758a067738c480da880f4fc6a34066b",
+                               "download_url":  "https://data.phishtank.com/data/online-valid.csv.gz"
+                           },
+    "tranco_snapshot":  {
+                            "filename":  "tranco_top_1m_list_947N2_20261110.csv.zip",
+                            "list_id":  "947N2",
+                            "sha256":  "0f9b445359626d98eca3d84d6daf31c35f187a8a1d0353ab960556c24a137788",
+                            "download_url":  "https://tranco-list.eu/top-1m.csv.zip"
+                        }
+}
